@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Spec Kit agent folder (may contain credentials/tokens)
+.cursor/
