@@ -613,7 +613,9 @@ func applyConfidenceThreshold(catResp *CategorizationResponse) *domain.DocumentM
 
 	// Infer Model Year from current date if not detected and document is for a "New" product
 	// This is common for non-US market brochures that don't explicitly state the model year
-	if metadata.ModelYear == 0 && (metadata.Condition == "New" || catResp.Condition == "New") {
+	// Only infer if Condition was set with sufficient confidence (metadata.Condition != "Unknown")
+	// to respect the confidence threshold requirement
+	if metadata.ModelYear == 0 && metadata.Condition == "New" {
 		currentYear := time.Now().Year()
 		// Use current year for new products (brochures are typically for current/upcoming model year)
 		metadata.ModelYear = currentYear
