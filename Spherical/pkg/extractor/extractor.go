@@ -13,8 +13,15 @@ import (
 
 // Re-export event types for public API
 type (
-	StreamEvent = domain.StreamEvent
-	EventType   = domain.EventType
+	StreamEvent      = domain.StreamEvent
+	EventType        = domain.EventType
+	DocumentMetadata = domain.DocumentMetadata // FR-016: Document categorization metadata
+)
+
+// Re-export processing types from extract package
+type (
+	CompletePayload = extract.CompletePayload // FR-016: EventComplete payload with metadata
+	ProcessResult   = extract.ProcessResult   // FR-016: Processing result with metadata
 )
 
 // Event type constants
@@ -105,4 +112,7 @@ func (c *Client) Process(ctx context.Context, pdfPath string) (<-chan StreamEven
 func (c *Client) Close() error {
 	return c.converter.Cleanup()
 }
+
+
+
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -26,6 +27,7 @@ var (
 	outputPath  string
 	showVersion bool
 	verbose     bool
+	summaryJSON bool // FR-016: Output summary JSON with categorization metadata
 )
 
 func init() {
@@ -34,6 +36,7 @@ func init() {
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	flag.BoolVar(&showVersion, "v", false, "Show version information (shorthand)")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&summaryJSON, "summary-json", false, "Output summary JSON with categorization metadata (FR-016)")
 	flag.Usage = usage
 }
 
@@ -105,16 +108,19 @@ func main() {
 	// Create event channel
 	eventCh := make(chan domain.StreamEvent, 100)
 
-	// Start extraction in goroutine
+	// Start extraction in goroutine and capture result (FR-016)
+	resultCh := make(chan *extract.ProcessResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		err := extractor.Process(ctx, pdfPath, eventCh)
+		result, err := extractor.ProcessWithResult(ctx, pdfPath, eventCh)
 		close(eventCh)
+		resultCh <- result
 		errCh <- err
 	}()
 
 	// Process events and display progress
 	var markdown strings.Builder
+	var metadata *domain.DocumentMetadata
 	startTime := time.Now()
 
 	fmt.Printf("Processing PDF: %s\n", pdfPath)
@@ -151,15 +157,38 @@ func main() {
 		case domain.EventComplete:
 			duration := time.Since(startTime)
 			fmt.Println(strings.Repeat("=", 60))
-			fmt.Printf("✓ %s\n", event.Payload)
+
+			// Extract metadata from EventComplete payload (FR-016)
+			if payload, ok := event.Payload.(*extract.CompletePayload); ok {
+				fmt.Printf("✓ %s\n", payload.Message)
+				metadata = payload.Metadata
+				if metadata != nil {
+					fmt.Printf("\n📋 Document Categorization:\n")
+					fmt.Printf("   Domain:      %s\n", metadata.Domain)
+					fmt.Printf("   Make:        %s\n", metadata.Make)
+					fmt.Printf("   Model:       %s\n", metadata.Model)
+					fmt.Printf("   Model Year:  %d\n", metadata.ModelYear)
+					fmt.Printf("   Country:     %s\n", metadata.CountryCode)
+					fmt.Printf("   Condition:   %s\n", metadata.Condition)
+				}
+			} else if msg, ok := event.Payload.(string); ok {
+				fmt.Printf("✓ %s\n", msg)
+			}
+
 			fmt.Printf("Total time: %v\n", duration.Round(time.Second))
 		}
 	}
 
-	// Wait for extraction to complete
+	// Wait for extraction to complete and get result
+	result := <-resultCh
 	if err := <-errCh; err != nil {
 		fmt.Fprintf(os.Stderr, "\n❌ Extraction failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Get metadata from result if not already set
+	if metadata == nil && result != nil {
+		metadata = result.Metadata
 	}
 
 	// Write output file
@@ -170,7 +199,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Write summary JSON if requested (T618 - FR-016)
+	if summaryJSON {
+		jsonPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + "-summary.json"
+		summary := SummaryOutput{
+			Metadata:   metadata,
+			OutputFile: outputPath,
+			Stats:      nil,
+		}
+		if result != nil {
+			summary.Stats = &result.Stats
+		}
+
+		jsonBytes, err := json.MarshalIndent(summary, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Failed to marshal summary JSON: %v\n", err)
+			os.Exit(1)
+		}
+
+		err = os.WriteFile(jsonPath, jsonBytes, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Failed to write summary JSON file: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("✓ Summary JSON written to %s\n", jsonPath)
+	}
+
 	fmt.Printf("✓ Successfully extracted specifications to %s\n", outputPath)
+}
+
+// SummaryOutput represents the --summary-json output structure (FR-016)
+type SummaryOutput struct {
+	Metadata   *domain.DocumentMetadata `json:"metadata"`
+	OutputFile string                   `json:"output_file"`
+	Stats      *extract.ProcessStats    `json:"stats,omitempty"`
 }
 
 func usage() {
@@ -183,6 +246,7 @@ Options:
   -o, --output <file>   Output file path (default: <input-name>-specs.md)
   -v, --version         Show version information
   --verbose             Enable verbose logging
+  --summary-json        Output summary JSON with categorization metadata (FR-016)
 
 Environment Variables:
   OPENROUTER_API_KEY    OpenRouter API key (required)
@@ -192,6 +256,7 @@ Examples:
   pdf-extractor brochure.pdf
   pdf-extractor -o specs.md brochure.pdf
   pdf-extractor --verbose brochure.pdf
+  pdf-extractor --summary-json brochure.pdf
 
 `)
 }

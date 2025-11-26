@@ -55,3 +55,6 @@ echo "  • Integration tests: go test -v ./tests/integration/"
 echo "  • Run CLI:           ./pdf-extractor <pdf-file>"
 
 
+
+
+

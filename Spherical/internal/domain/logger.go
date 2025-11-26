@@ -74,3 +74,6 @@ func (l *Logger) WithPrefix(prefix string) *Logger {
 // DefaultLogger is the default logger instance
 var DefaultLogger = NewLogger(LogLevelInfo)
 
+
+
+

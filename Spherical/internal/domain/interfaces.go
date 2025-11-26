@@ -24,3 +24,6 @@ type Pipeline interface {
 	Process(ctx context.Context, pdfPath string) (<-chan StreamEvent, error)
 }
 
+
+
+

@@ -9,6 +9,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/spherical/pdf-extractor/internal/domain"
 )
@@ -294,4 +298,516 @@ func (c *Client) parseStream(body io.Reader, resultCh chan<- string) error {
 		return domain.APIError("Failed to parse stream", err)
 	}
 	return nil
+}
+
+// CategorizationResponse represents the LLM's categorization response
+type CategorizationResponse struct {
+	Domain           string  `json:"domain"`
+	DomainConfidence float64 `json:"domain_confidence"`
+
+	Subdomain           string  `json:"subdomain"`
+	SubdomainConfidence float64 `json:"subdomain_confidence"`
+
+	CountryCode           string  `json:"country_code"`
+	CountryCodeConfidence float64 `json:"country_code_confidence"`
+
+	ModelYear           int     `json:"model_year"`
+	ModelYearConfidence float64 `json:"model_year_confidence"`
+
+	Condition           string  `json:"condition"`
+	ConditionConfidence float64 `json:"condition_confidence"`
+
+	Make           string  `json:"make"`
+	MakeConfidence float64 `json:"make_confidence"`
+
+	Model           string  `json:"model"`
+	ModelConfidence float64 `json:"model_confidence"`
+}
+
+// ConfidenceThreshold is the minimum confidence (70%) for categorization fields (FR-016)
+const ConfidenceThreshold = 0.70
+
+// DetectCategorization analyzes page images and extracts document metadata (FR-016)
+// It implements sequential page fallback: cover page → first page → subsequent pages
+func (c *Client) DetectCategorization(ctx context.Context, pageImages []domain.PageImage) (*domain.DocumentMetadata, error) {
+	if len(pageImages) == 0 {
+		return domain.NewDocumentMetadata(), nil
+	}
+
+	// Sequential page fallback: try each page until we get clear categorization
+	for _, pageImage := range pageImages {
+		metadata, err := c.detectCategorizationFromPage(ctx, pageImage.ImagePath)
+		if err != nil {
+			// Log error and continue to next page
+			continue
+		}
+
+		// Check if we got meaningful categorization (at least one field is valid)
+		if metadata.IsValid() && metadata.Confidence >= ConfidenceThreshold {
+			return metadata, nil
+		}
+	}
+
+	// All pages failed or returned low confidence - return default metadata
+	return domain.NewDocumentMetadata(), nil
+}
+
+// detectCategorizationFromPage analyzes a single page for categorization
+func (c *Client) detectCategorizationFromPage(ctx context.Context, imagePath string) (*domain.DocumentMetadata, error) {
+	// Build categorization request
+	req, err := c.buildCategorizationRequest(imagePath)
+	if err != nil {
+		return nil, domain.APIError("Failed to build categorization request", err)
+	}
+
+	// Marshal request body
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, domain.APIError("Failed to marshal request", err)
+	}
+
+	// Send request with retry logic
+	resp, err := c.retryWithBackoff(ctx, func() (*http.Response, error) {
+		reqBody := bytes.NewReader(body)
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, reqBody)
+		if err != nil {
+			return nil, err
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		httpReq.Header.Set("HTTP-Referer", "https://github.com/spherical/pdf-extractor")
+		httpReq.Header.Set("X-Title", "PDF Specification Extractor")
+
+		return c.httpClient.Do(httpReq)
+	})
+
+	if err != nil {
+		return nil, domain.APIError("Failed to send categorization request", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, domain.APIError(fmt.Sprintf("API returned status %d: %s", resp.StatusCode, string(bodyBytes)), nil)
+	}
+
+	// Parse non-streaming response
+	return c.parseCategorizationResponse(resp.Body)
+}
+
+// buildCategorizationRequest constructs the API request for categorization
+func (c *Client) buildCategorizationRequest(imagePath string) (*Request, error) {
+	// Read and encode image
+	imageData, err := os.ReadFile(imagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read image: %w", err)
+	}
+
+	base64Image := base64.StdEncoding.EncodeToString(imageData)
+	imageURL := "data:image/jpeg;base64," + base64Image
+
+	// Build message
+	msg := Message{
+		Role: "user",
+		Content: []ContentPart{
+			{
+				Type: "text",
+				Text: buildCategorizationPrompt(),
+			},
+			{
+				Type: "image_url",
+				ImageURL: &ImageURL{
+					URL: imageURL,
+				},
+			},
+		},
+	}
+
+	return &Request{
+		Model:    c.model,
+		Messages: []Message{msg},
+		Stream:   false, // Non-streaming for categorization
+	}, nil
+}
+
+// buildCategorizationPrompt creates the categorization detection prompt (T605)
+func buildCategorizationPrompt() string {
+	return `You are a document categorization expert. Analyze this image from a document (likely a cover page or title page).
+
+Extract document metadata and return ONLY a valid JSON object with the following structure:
+
+{
+  "domain": "Automobile|Real Estate|Luxury Watch|Jewelry|Electronics|Fashion|Furniture|Art|Collectibles|Other",
+  "domain_confidence": 0.0-1.0,
+  "subdomain": "string (e.g., Commercial, Consumer, Residential, Sports, Sedan, SUV)",
+  "subdomain_confidence": 0.0-1.0,
+  "country_code": "ISO 3166-1 alpha-2 code (e.g., US, UK, IN, DE, JP)",
+  "country_code_confidence": 0.0-1.0,
+  "model_year": integer (e.g., 2025, 2024) or 0 if not found,
+  "model_year_confidence": 0.0-1.0,
+  "condition": "New|Used|Secondary Resale|Certified Pre-Owned|Refurbished",
+  "condition_confidence": 0.0-1.0,
+  "make": "string (manufacturer/brand name, e.g., Toyota, Rolex, Apple)",
+  "make_confidence": 0.0-1.0,
+  "model": "string (specific model name, e.g., Camry, Submariner, iPhone)",
+  "model_confidence": 0.0-1.0
+}
+
+DETECTION RULES:
+1. Domain Detection:
+   - Look for product type indicators: vehicle images → Automobile, property photos → Real Estate, watch → Luxury Watch
+   - Use visual cues and text context to determine domain
+
+2. Subdomain/Type Detection (IMPORTANT - this indicates the product type):
+   - For Automobile: Sedan, SUV, Hatchback, Truck, MPV, Crossover, Coupe, Convertible, Wagon, Van, Commercial Vehicle, Sports Car, Luxury, Electric Vehicle (EV), Hybrid
+   - For Real Estate: Residential, Commercial, Industrial, Land, Apartment, Villa, Office Space
+   - For Electronics: Smartphone, Laptop, Tablet, Wearable, Home Appliance
+   - Use context clues from the document to determine the specific product type/category
+
+3. Country Code Detection:
+   - Look for country names, language, currency symbols, phone formats, regional pricing
+   - Check for "Available in [Country]", distributor information, regulatory marks
+   - Default to "Unknown" if not determinable
+   - Use ISO 3166-1 alpha-2 codes (US, UK, IN, DE, FR, JP, etc.)
+
+4. Model Year Detection (CRITICAL - try hard to find this):
+   - Look for explicit year mentions: "2025 Model", "MY2024", "2025 Edition", "All-New 2025"
+   - Check titles/headers for years like "The 2025 [Model Name]"
+   - Look for copyright years (© 2025) - this often indicates current model year
+   - Check for "New for 2025", "Introducing the 2025", "Launch Year"
+   - Look at publication dates - brochures are usually for current/next model year
+   - For automobiles: Check for model year in specs tables
+   - Common patterns: "FY2025", "MY25", "2025 MY", "Model Year 2025"
+   - If document appears to be for a current/upcoming product and shows recent copyright, use that year
+   - Return 0 ONLY if absolutely no year indication is found
+
+5. Condition Detection:
+   - Default to "New" for marketing brochures/spec sheets/official brand documents
+   - Look for "Used", "Pre-owned", "Certified", "Second-hand" keywords
+   - "Secondary Resale" for auction/resale documents
+   - "Certified Pre-Owned" or "CPO" for manufacturer-certified used vehicles
+
+6. Make & Model Detection:
+   - Make: Brand/manufacturer name (Toyota, BMW, Rolex, Maruti Suzuki, etc.)
+   - Model: Specific product name (Camry, X5, Submariner, Wagon R, etc.)
+   - Look in titles, headers, logos, prominent text
+   - For automobiles: The largest text on cover is usually Make + Model
+
+CONFIDENCE SCORING:
+- 0.9-1.0: Explicitly stated in document
+- 0.7-0.89: Strongly implied or clearly visible
+- 0.5-0.69: Inferred from context
+- 0.0-0.49: Uncertain/guessed
+
+OUTPUT RULES:
+- Return ONLY valid JSON, no markdown formatting
+- No explanations or additional text
+- Use "Unknown" for string fields if not found
+- Use 0 for model_year if not found
+- Always include confidence scores for each field`
+}
+
+// parseCategorizationResponse parses the LLM response for categorization
+func (c *Client) parseCategorizationResponse(body io.Reader) (*domain.DocumentMetadata, error) {
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		return nil, domain.APIError("Failed to read response body", err)
+	}
+
+	// Parse the API response wrapper
+	var apiResp Response
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, domain.APIError("Failed to parse API response", err)
+	}
+
+	if len(apiResp.Choices) == 0 {
+		return nil, domain.APIError("No choices in API response", nil)
+	}
+
+	// Get the content from the response
+	content := apiResp.Choices[0].Message.Content
+	if content == "" {
+		content = apiResp.Choices[0].Delta.Content
+	}
+
+	// Parse the JSON content from the LLM response
+	catResp, err := parseCategorizationJSON(content)
+	if err != nil {
+		// Fallback: try to extract metadata heuristically
+		return extractCategorizationHeuristically(content), nil
+	}
+
+	// Convert to DocumentMetadata with confidence threshold logic (T607)
+	return applyConfidenceThreshold(catResp), nil
+}
+
+// parseCategorizationJSON extracts and parses JSON from LLM response
+func parseCategorizationJSON(content string) (*CategorizationResponse, error) {
+	// Try to find JSON in the response (LLM might include extra text)
+	content = strings.TrimSpace(content)
+
+	// Remove markdown code blocks if present
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	// Find JSON object boundaries
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+
+	if start == -1 || end == -1 || end <= start {
+		return nil, fmt.Errorf("no valid JSON found in response")
+	}
+
+	jsonContent := content[start : end+1]
+
+	var catResp CategorizationResponse
+	if err := json.Unmarshal([]byte(jsonContent), &catResp); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	// Debug: log what we parsed for model year
+	if catResp.ModelYear > 0 || catResp.ModelYearConfidence > 0 {
+		// Model year was found by LLM
+		domain.DefaultLogger.WithPrefix("llm").Info("LLM returned ModelYear=%d (confidence=%.2f)", catResp.ModelYear, catResp.ModelYearConfidence)
+	}
+
+	return &catResp, nil
+}
+
+// applyConfidenceThreshold applies the >70% confidence threshold to categorization fields (T607)
+func applyConfidenceThreshold(catResp *CategorizationResponse) *domain.DocumentMetadata {
+	metadata := domain.NewDocumentMetadata()
+
+	// Apply threshold to each field
+	if catResp.DomainConfidence >= ConfidenceThreshold {
+		metadata.Domain = domain.NormalizeDomain(catResp.Domain)
+	}
+
+	if catResp.SubdomainConfidence >= ConfidenceThreshold && catResp.Subdomain != "" {
+		metadata.Subdomain = catResp.Subdomain
+	}
+
+	if catResp.CountryCodeConfidence >= ConfidenceThreshold {
+		metadata.CountryCode = domain.NormalizeCountryCode(catResp.CountryCode)
+	}
+
+	// Model Year - use explicit year if found with sufficient confidence
+	if catResp.ModelYear > 0 && catResp.ModelYearConfidence >= ConfidenceThreshold && domain.ValidateModelYear(catResp.ModelYear) {
+		metadata.ModelYear = catResp.ModelYear
+	}
+
+	if catResp.ConditionConfidence >= ConfidenceThreshold && catResp.Condition != "" {
+		metadata.Condition = domain.NormalizeCondition(catResp.Condition)
+	}
+
+	if catResp.MakeConfidence >= ConfidenceThreshold && catResp.Make != "" {
+		metadata.Make = catResp.Make
+	}
+
+	if catResp.ModelConfidence >= ConfidenceThreshold && catResp.Model != "" {
+		metadata.Model = catResp.Model
+	}
+
+	// Infer Model Year from current date if not detected and document is for a "New" product
+	// This is common for non-US market brochures that don't explicitly state the model year
+	if metadata.ModelYear == 0 && (metadata.Condition == "New" || catResp.Condition == "New") {
+		currentYear := time.Now().Year()
+		// Use current year for new products (brochures are typically for current/upcoming model year)
+		metadata.ModelYear = currentYear
+		domain.DefaultLogger.WithPrefix("llm").Info("Inferred ModelYear=%d from current date (new product brochure)", currentYear)
+	}
+
+	// Calculate overall confidence as average of non-zero confidences
+	confidences := []float64{
+		catResp.DomainConfidence,
+		catResp.SubdomainConfidence,
+		catResp.CountryCodeConfidence,
+		catResp.ModelYearConfidence,
+		catResp.ConditionConfidence,
+		catResp.MakeConfidence,
+		catResp.ModelConfidence,
+	}
+	var sum float64
+	var count int
+	for _, conf := range confidences {
+		if conf > 0 {
+			sum += conf
+			count++
+		}
+	}
+	if count > 0 {
+		metadata.Confidence = sum / float64(count)
+	}
+
+	return metadata
+}
+
+// extractCategorizationHeuristically attempts to extract metadata from non-JSON response
+// This is a fallback when LLM doesn't provide proper JSON (T607 heuristic fallback)
+func extractCategorizationHeuristically(content string) *domain.DocumentMetadata {
+	metadata := domain.NewDocumentMetadata()
+	content = strings.ToLower(content)
+
+	// Heuristic domain detection
+	domainPatterns := map[string][]string{
+		"Automobile":   {"car", "vehicle", "sedan", "suv", "truck", "automotive", "motor"},
+		"Real Estate":  {"property", "house", "apartment", "real estate", "residential", "commercial"},
+		"Luxury Watch": {"watch", "timepiece", "chronograph", "rolex", "omega"},
+		"Jewelry":      {"jewelry", "jewellery", "diamond", "gold", "necklace", "ring"},
+		"Electronics":  {"electronic", "phone", "computer", "laptop", "tablet", "device"},
+	}
+
+	for domainName, patterns := range domainPatterns {
+		for _, pattern := range patterns {
+			if strings.Contains(content, pattern) {
+				metadata.Domain = domainName
+				metadata.Confidence = 0.5 // Heuristic confidence is lower
+				break
+			}
+		}
+		if metadata.Domain != "Unknown" {
+			break
+		}
+	}
+
+	// Heuristic year detection
+	yearRegex := regexp.MustCompile(`\b(20[0-9]{2}|19[0-9]{2})\b`)
+	if matches := yearRegex.FindStringSubmatch(content); len(matches) > 0 {
+		if year, err := strconv.Atoi(matches[1]); err == nil && domain.ValidateModelYear(year) {
+			metadata.ModelYear = year
+		}
+	}
+
+	// Heuristic condition detection
+	if strings.Contains(content, "used") || strings.Contains(content, "pre-owned") {
+		metadata.Condition = "Used"
+	} else if strings.Contains(content, "new") || strings.Contains(content, "brochure") {
+		metadata.Condition = "New"
+	}
+
+	return metadata
+}
+
+// DetectCategorizationWithMajorityVote analyzes multiple pages and uses majority vote for conflicts (T611)
+func (c *Client) DetectCategorizationWithMajorityVote(ctx context.Context, pageImages []domain.PageImage) (*domain.DocumentMetadata, error) {
+	if len(pageImages) == 0 {
+		return domain.NewDocumentMetadata(), nil
+	}
+
+	// If only one page, use direct detection
+	if len(pageImages) == 1 {
+		return c.DetectCategorization(ctx, pageImages)
+	}
+
+	// Collect metadata from multiple pages
+	var allMetadata []*domain.DocumentMetadata
+	for _, pageImage := range pageImages {
+		metadata, err := c.detectCategorizationFromPage(ctx, pageImage.ImagePath)
+		if err != nil {
+			continue
+		}
+		if metadata.IsValid() {
+			allMetadata = append(allMetadata, metadata)
+		}
+	}
+
+	if len(allMetadata) == 0 {
+		return domain.NewDocumentMetadata(), nil
+	}
+
+	if len(allMetadata) == 1 {
+		return allMetadata[0], nil
+	}
+
+	// Apply majority vote
+	return majorityVote(allMetadata), nil
+}
+
+// majorityVote selects the most common value for each field from multiple metadata results
+func majorityVote(metadataList []*domain.DocumentMetadata) *domain.DocumentMetadata {
+	result := domain.NewDocumentMetadata()
+
+	// Count occurrences for each field
+	domainCounts := make(map[string]int)
+	subdomainCounts := make(map[string]int)
+	countryCodeCounts := make(map[string]int)
+	modelYearCounts := make(map[int]int)
+	conditionCounts := make(map[string]int)
+	makeCounts := make(map[string]int)
+	modelCounts := make(map[string]int)
+	var totalConfidence float64
+
+	for _, m := range metadataList {
+		if m.Domain != "Unknown" {
+			domainCounts[m.Domain]++
+		}
+		if m.Subdomain != "Unknown" {
+			subdomainCounts[m.Subdomain]++
+		}
+		if m.CountryCode != "Unknown" {
+			countryCodeCounts[m.CountryCode]++
+		}
+		if m.ModelYear != 0 {
+			modelYearCounts[m.ModelYear]++
+		}
+		if m.Condition != "Unknown" {
+			conditionCounts[m.Condition]++
+		}
+		if m.Make != "Unknown" {
+			makeCounts[m.Make]++
+		}
+		if m.Model != "Unknown" {
+			modelCounts[m.Model]++
+		}
+		totalConfidence += m.Confidence
+	}
+
+	// Select majority for each field
+	result.Domain = selectMajority(domainCounts, "Unknown")
+	result.Subdomain = selectMajority(subdomainCounts, "Unknown")
+	result.CountryCode = selectMajority(countryCodeCounts, "Unknown")
+	result.ModelYear = selectMajorityInt(modelYearCounts, 0)
+	result.Condition = selectMajority(conditionCounts, "Unknown")
+	result.Make = selectMajority(makeCounts, "Unknown")
+	result.Model = selectMajority(modelCounts, "Unknown")
+	result.Confidence = totalConfidence / float64(len(metadataList))
+
+	return result
+}
+
+// selectMajority returns the string value with the highest count
+func selectMajority(counts map[string]int, defaultValue string) string {
+	if len(counts) == 0 {
+		return defaultValue
+	}
+
+	var maxCount int
+	var maxValue string
+	for value, count := range counts {
+		if count > maxCount {
+			maxCount = count
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+// selectMajorityInt returns the int value with the highest count
+func selectMajorityInt(counts map[int]int, defaultValue int) int {
+	if len(counts) == 0 {
+		return defaultValue
+	}
+
+	var maxCount int
+	var maxValue int
+	for value, count := range counts {
+		if count > maxCount {
+			maxCount = count
+			maxValue = value
+		}
+	}
+	return maxValue
 }

@@ -123,3 +123,6 @@ func (c *Client) retryWithBackoff(ctx context.Context, reqFunc func() (*http.Res
 	return nil, domain.APIError(fmt.Sprintf("request failed after %d retries", config.MaxRetries), lastErr)
 }
 
+
+
+

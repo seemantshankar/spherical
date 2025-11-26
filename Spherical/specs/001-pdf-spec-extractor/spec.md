@@ -1,7 +1,7 @@
 # PDF Specification Extractor – Functional Specification
 
-- **Document Version**: 1.0  
-- **Last Updated**: 2025-11-23  
+- **Document Version**: 1.1  
+- **Last Updated**: 2025-11-24  
 - **Owner**: Spherical AI Platform Team  
 - **Audience**: Product, Engineering, QA, and DevOps stakeholders
 
@@ -9,7 +9,17 @@
 
 The PDF Specification Extractor ingests multi-page marketing or technical brochures in PDF form, converts each page into high-quality JPG images, and uses a vision-capable LLM (via OpenRouter) to extract structured specifications, tables, and unique selling points (USPs). The system is exposed both as a CLI executable and as an embeddable Go library with streaming progress events.
 
-## 2. Goals & Non-Goals
+## 2. Clarifications
+
+### Session 2025-11-24
+
+- Q: What format should be used for the categorization header (YAML frontmatter vs Markdown table)? → A: YAML frontmatter (between `---` delimiters at top of file)
+- Q: How is the >70% confidence threshold for categorization fields measured? → A: LLM response confidence scores (if model provides them)
+- Q: Which page takes precedence for categorization detection (first page vs cover page)? → A: Cover page takes precedence, fallback to first page if cover is blank/unreadable
+- Q: How should categorization conflicts across pages be resolved? → A: Re-analyze and use majority vote across pages (more accurate but slower)
+- Q: What validation rules should be applied to categorization fields? → A: Domain-specific validation (country codes: ISO 3166-1 alpha-2, model years: reasonable range, domains: predefined list)
+
+## 3. Goals & Non-Goals
 
 - **Goals**
   - Produce auditable Markdown artifacts containing tabular specs, feature bullets, and USPs.
@@ -20,14 +30,14 @@ The PDF Specification Extractor ingests multi-page marketing or technical brochu
   - OCR of scanned PDFs (out of scope for V1).
   - Automatic translation/localization of extracted specs.
 
-## 3. Stakeholders
+## 4. Stakeholders
 
 - Product owner (feature prioritization, success criteria).
 - Platform engineers (CLI + library implementers).
 - QA / Validation (acceptance scenarios and regression suites).
 - Solution integrators (embedder teams consuming Go API/events).
 
-## 4. Interfaces & Deployment Modes
+## 5. Interfaces & Deployment Modes
 
 1. **CLI (`cmd/pdf-extractor`)**
    - Accepts a PDF path and optional flags (`--output`, `--jpg-quality`, `--model`, `--stream-json`).
@@ -38,25 +48,25 @@ The PDF Specification Extractor ingests multi-page marketing or technical brochu
 3. **Automation Pipelines**
    - May run sequential CLI invocations or embed the library inside job runners.
 
-## 5. Assumptions & External Dependencies
+## 6. Assumptions & External Dependencies
 
 1. **MuPDF 1.24.9** (via `go-fitz`) is installed and kept in sync with Go bindings.
 2. **OpenRouter availability** with configured Gemini 2.5 Flash (default) or Gemini 2.5 Pro models.
 3. **Network Stability**: outbound HTTPS access to OpenRouter with <200 ms median latency; mitigations documented when this assumption fails.
 4. **Storage**: Temporary disk space (2× PDF size) is available for intermediate JPG and Markdown artifacts.
 
-## 6. Use Cases & Scenarios
+## 7. Use Cases & Scenarios
 
 - **US1 – Marketing Brochure Extraction**
-  - *Scenario 1*: Balanced marketing/spec pages → extractor produces Markdown per page.
-  - *Scenario 2*: Mixed content with repeated tables → deduped output while keeping structure.
-  - *Scenario 3*: Marketing-heavy pages lacking specs → extractor records placeholders (“No actionable specs detected”) and logs reasons instead of hallucinating.
+  - *Scenario 1*: Balanced marketing/spec pages → extractor produces Markdown per page with categorization header at top.
+  - *Scenario 2*: Mixed content with repeated tables → deduped output while keeping structure, categorization detected from document context.
+  - *Scenario 3*: Marketing-heavy pages lacking specs → extractor records placeholders ("No actionable specs detected") and logs reasons instead of hallucinating; categorization still attempted from available context.
 - **US2 – Technical Datasheet Extraction**
   - *Scenario 4*: Conversion failure mid-document → partial Markdown retained, retries attempted, cleanup rules triggered.
 - **US3 – Pipeline Streaming Consumer**
   - *Scenario 5*: Library embedder subscribes to streaming events and surfaces real-time progress bars with <750 ms average latency between PDF conversion finish and first LLM chunk.
 
-## 7. Functional Requirements
+## 8. Functional Requirements
 
 - **FR-001 – PDF Validation**
   - Reject non-existent files, enforce `.pdf` extension, ensure readable permissions, and emit `EventError` with actionable hints.
@@ -109,15 +119,23 @@ The PDF Specification Extractor ingests multi-page marketing or technical brochu
   - Process pages sequentially to cap RSS at 500 MB.  
   - Must process 20-page brochure in <2 minutes on reference hardware (M3 Pro, 32 GB) assuming OpenRouter latency <500 ms per chunk.  
   - Queue overflow policy documented for >100 pages (warn operator and continue sequentially).
+- **FR-016 – Document Categorization & Metadata**
+  - Automatically detect and extract document classification metadata from the PDF content using LLM analysis.  
+  - Categorization must include: **Domain** (e.g., Automobile, Real Estate, Luxury Watch, Jewelry), **Subdomain** (e.g., Commercial, Consumer), **ANSI Country Code** (e.g., IN for India, UK for United Kingdom), **Model Year** (e.g., 2025, 2024), and **Condition** (e.g., New, Used, Secondary Resale). Validation rules: Country codes must conform to ISO 3166-1 alpha-2 standard; Model Year must be within a reasonable range (e.g., 1900-2100); Domain values must match a predefined list of supported domains; Subdomain and Condition are free-form but should follow common conventions.  
+  - Detection should occur during initial document analysis: cover page takes precedence; if cover page is blank, unreadable, or not detected, fallback to first page. If the first page is also ambiguous or unreadable, continue to subsequent pages sequentially until a page is found that provides clear categorization information. When conflicts are detected across pages, re-analyze categorization from multiple pages and use majority vote to determine final values for each field.  
+  - Extracted metadata must be presented at the very top of the Markdown output in a structured header section, appearing before any page-specific content.  
+  - Header format: Include Make and Model (if applicable) along with all categorization fields in YAML frontmatter format (between `---` delimiters at the very top of the Markdown file, before any page content).  
+  - If any categorization field cannot be determined with reasonable confidence (>70% based on LLM response confidence scores, if the model provides them), mark as "Unknown" rather than hallucinating values. If the LLM model does not provide confidence scores, fallback to validation heuristics (pattern matching, keyword presence, format validation) to estimate confidence.  
+  - Categorization metadata must also be included in the `EventComplete` payload and `--summary-json` output for programmatic access.
 
-## 8. Non-Functional Requirements
+## 9. Non-Functional Requirements
 
 - **NFR-001 – Memory Footprint**: RSS <500 MB, tmp storage <2× PDF size.
 - **NFR-002 – Observability**: Structured logs with correlation IDs per run.
 - **NFR-003 – Security**: `.env` access limited to local filesystem; instructions for rotating API keys every 90 days.
 - **NFR-004 – Reliability**: SLA 99% success across nightly regression set; retries + resume behavior documented.
 
-## 9. Success Criteria
+## 10. Success Criteria
 
 - **SC-001 – Spec Coverage**: ≥95% of verifiable specs captured vs human baseline sample of 20 documents; sampling instructions defined in QA plan.
 - **SC-002 – Table Fidelity**: 100% of tables preserved (structure & values) for baseline set of 10 docs; QA records diff artifacts.
@@ -125,15 +143,16 @@ The PDF Specification Extractor ingests multi-page marketing or technical brochu
 - **SC-004 – Streaming Latency**: Average <750 ms from `EventPageComplete` to first `EventLLMStreaming` chunk.
 - **SC-005 – Streaming Reliability**: No dropped events in 10 sequential runs; CLI spinner and library events stay consistent.
 
-## 10. Acceptance Scenarios
+## 11. Acceptance Scenarios
 
-1. **Scenario A – Happy Path CLI**: CLI run on brochure with mix of tables/USPs completes successfully, generates Markdown file, and deletes tmp directory.
-2. **Scenario B – Marketing-Heavy Pages**: Document with 3 consecutive marketing-only pages records “No actionable specs” stubs while keeping USPs defined in FR-005.
-3. **Scenario C – Conversion Failure**: Page 12 conversion fails; system retries page only, emits `EventRetry`, persists partial file, exits with code 2, logs cleanup pointer as per FR-012.
-4. **Scenario D – Streaming Consumer**: Library embedder verifies event order and latency meets SC-004; CLI spinner optional.
+1. **Scenario A – Happy Path CLI**: CLI run on brochure with mix of tables/USPs completes successfully, generates Markdown file with categorization header (Domain, Subdomain, Country Code, Model Year, Condition, Make, Model) at top, and deletes tmp directory.
+2. **Scenario B – Marketing-Heavy Pages**: Document with 3 consecutive marketing-only pages records "No actionable specs" stubs while keeping USPs defined in FR-005; categorization header still present based on available document context.
+3. **Scenario C – Conversion Failure**: Page 12 conversion fails; system retries page only, emits `EventRetry`, persists partial file, exits with code 2, logs cleanup pointer as per FR-012; categorization header included in partial output.
+4. **Scenario D – Streaming Consumer**: Library embedder verifies event order and latency meets SC-004; CLI spinner optional; categorization metadata available in `EventComplete` payload.
 5. **Scenario E – Rate Limit Storm**: OpenRouter returns 429 for first 3 attempts; system demonstrates FR-010 jittered retries and final success/failure handling.
+6. **Scenario F – Document Categorization**: Automobile brochure from India (2025 model year, Consumer subdomain, New condition) correctly extracts all categorization fields and presents them at the top of Markdown output alongside Make and Model.
 
-## 11. Traceability Matrix
+## 12. Traceability Matrix
 
 | Requirement | Verification Method |
 |-------------|---------------------|
@@ -141,4 +160,5 @@ The PDF Specification Extractor ingests multi-page marketing or technical brochu
 | FR-004–FR-007 | QA sampling using Volvo XC90 brochures |
 | FR-010 | `internal/llm/retry.go` unit tests + perf logs |
 | FR-013–FR-014 | Streaming tests `tests/integration/stream_test.go` |
+| FR-016 | Integration tests with diverse document types (automobile, real estate, luxury goods); validation of categorization accuracy vs human baseline |
 | SC-001–SC-005 | Manual QA checklist + automated benchmarks |

@@ -11,6 +11,7 @@ A Go library and CLI tool to extract product specifications from PDF documents u
 - 💪 **Robust Error Handling**: Automatic retries with exponential backoff for rate limits
 - 🧹 **Memory Efficient**: Sequential page processing for low memory footprint
 - 📚 **Library & CLI**: Use as a library in your Go code or as a standalone CLI tool
+- 🏷️ **Document Categorization**: Automatic detection of domain, make, model, country, year, and condition (FR-016)
 
 ## Prerequisites
 
@@ -73,11 +74,13 @@ Options:
   -o, --output <file>   Output file path (default: <input-name>-specs.md)
   -v, --version         Show version information
   --verbose             Enable verbose logging
+  --summary-json        Output summary JSON with categorization metadata
 
 Examples:
   pdf-extractor brochure.pdf
   pdf-extractor -o specs.md brochure.pdf
   pdf-extractor --verbose brochure.pdf
+  pdf-extractor --summary-json brochure.pdf
 ```
 
 ### Library Usage
@@ -156,13 +159,35 @@ The library streams events as processing progresses:
 | `EventLLMStreaming` | LLM generated text chunk | String chunk |
 | `EventPageComplete` | Finished processing a page | Page number |
 | `EventError` | Error occurred | Error message |
-| `EventComplete` | All processing complete | Summary message |
+| `EventComplete` | All processing complete | `CompletePayload` struct with message, metadata, and stats |
+
+### EventComplete Payload (FR-016)
+
+The `EventComplete` event now includes document categorization metadata:
+
+```go
+type CompletePayload struct {
+    Message  string            // Summary message
+    Metadata *DocumentMetadata // Document categorization (domain, make, model, etc.)
+    Stats    ProcessStats      // Processing statistics
+}
+```
 
 ## Output Format
 
-The extracted specifications are returned as structured Markdown:
+The extracted specifications are returned as structured Markdown with a YAML frontmatter header containing document categorization metadata:
 
 ```markdown
+---
+domain: Automobile
+subdomain: Sedan
+country_code: IN
+model_year: 2025
+condition: New
+make: Toyota
+model: Camry
+---
+
 # Page 1
 
 ## Specifications
@@ -180,6 +205,50 @@ The extracted specifications are returned as structured Markdown:
 ## USPs (Unique Selling Points)
 - Best-in-class fuel efficiency
 - Spacious interior with boot space of 341L
+```
+
+### Document Categorization (FR-016)
+
+The YAML frontmatter at the top of the Markdown output contains:
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `domain` | Product category | Automobile, Real Estate, Luxury Watch, Jewelry |
+| `subdomain` | Sub-category | Sedan, SUV, Commercial, Residential |
+| `country_code` | ISO 3166-1 alpha-2 | IN, US, UK, DE, JP |
+| `model_year` | Product year (inferred from current date if not found and condition is "New") | 2025, 2024 |
+| `condition` | Product condition | New, Used, Certified Pre-Owned |
+| `make` | Manufacturer | Toyota, BMW, Rolex |
+| `model` | Product model | Camry, X5, Submariner |
+
+The categorization is automatically detected from the document cover page using AI. Fields with low confidence (<70%) are marked as "Unknown".
+
+**Model Year Inference**: If no explicit model year is found on the document but the product condition is "New", the current year is inferred as the model year. This is common for non-US market brochures that don't explicitly state model years.
+
+### Summary JSON Output
+
+When using `--summary-json`, a separate JSON file is created with categorization metadata:
+
+```json
+{
+  "metadata": {
+    "domain": "Automobile",
+    "subdomain": "Sedan",
+    "country_code": "IN",
+    "model_year": 2025,
+    "condition": "New",
+    "make": "Toyota",
+    "model": "Camry",
+    "confidence": 0.92
+  },
+  "output_file": "brochure-specs.md",
+  "stats": {
+    "total_pages": 12,
+    "successful_pages": 12,
+    "failed_pages": 0,
+    "duration": "2m15s"
+  }
+}
 ```
 
 ## Configuration
@@ -317,5 +386,8 @@ Contributions are welcome! Please:
 ---
 
 Built with ❤️ using Go and AI
+
+
+
 
 

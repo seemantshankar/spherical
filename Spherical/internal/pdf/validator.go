@@ -69,3 +69,6 @@ func (v *Validator) ValidateQuality(quality int) error {
 	return nil
 }
 
+
+
+

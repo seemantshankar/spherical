@@ -66,3 +66,6 @@ func IOError(message string, err error) *DomainError {
 	return NewError(ErrorTypeIO, message, err)
 }
 
+
+
+
