@@ -41,10 +41,10 @@ type ProcessResult struct {
 
 // ProcessStats contains processing statistics
 type ProcessStats struct {
-	TotalPages      int
-	SuccessfulPages int
-	FailedPages     int
-	Duration        time.Duration
+	TotalPages      int           `json:"total_pages"`
+	SuccessfulPages int           `json:"successful_pages"`
+	FailedPages     int           `json:"failed_pages"`
+	Duration        time.Duration `json:"duration"`
 }
 
 // Process handles the complete extraction workflow
