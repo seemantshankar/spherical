@@ -4,7 +4,7 @@
 **Prerequisites**: plan.md, spec.md (FR-016)  
 **Related Milestone**: M4 – Document Categorization (2025-12-10)
 
-**Note**: This task list covers only FR-016 (Document Categorization). All other functional requirements (FR-001 through FR-015) and non-functional requirements (NFR-001 through NFR-004) have already been implemented and tested. Their implementation can be found in the existing codebase.
+**Note**: This task list covers FR-016 (Document Categorization), FR-017 (4-Column Table), and FR-018 (Redundant Data Removal). All other functional requirements (FR-001 through FR-015) have already been implemented.
 
 **Organization**: Tasks are organized by implementation phase to enable systematic development and testing.
 
@@ -118,6 +118,28 @@
 - [x] T626 Create example output showing categorization header format
 - [x] T627 Validate against FR-016 requirements checklist
 - [x] T628 [P] Run acceptance scenario F (Document Categorization) from spec.md and verify all fields correctly extracted
+
+---
+
+## Phase 8: 4-Column Table Structure (FR-017)
+
+**Purpose**: Implement 4-column table extraction with "Key Features" column
+
+- [x] T801 Update prompt builder in `internal/llm/client.go` to request 4-column table format (`| Category | Specification | Value | Key Features |`)
+- [x] T802 Update markdown parsing logic in `internal/extract/service.go` to handle 4-column tables
+- [x] T803 [P] **TDD**: Write unit tests for 4-column table parsing in `internal/extract/service_test.go` FIRST
+- [x] T804 Verify "Key Features" are correctly associated with specifications in output
+
+---
+
+## Phase 9: Redundant Data Removal (FR-018)
+
+**Purpose**: Remove redundant specification entries across pages
+
+- [x] T901 Implement `DeduplicateSpecs` function in `internal/extract/service.go` to filter out duplicate specs (Category + Specification + Value match)
+- [x] T902 Update `internal/extract/service.go` to apply deduplication during aggregation
+- [x] T903 [P] **TDD**: Write unit tests for deduplication logic in `internal/extract/service_test.go` FIRST
+- [x] T904 Verify redundant dimension specs are removed in multi-page documents
 
 ---
 

@@ -127,6 +127,15 @@ The PDF Specification Extractor ingests multi-page marketing or technical brochu
   - Header format: Include Make and Model (if applicable) along with all categorization fields in YAML frontmatter format (between `---` delimiters at the very top of the Markdown file, before any page content).  
   - If any categorization field cannot be determined with reasonable confidence (>70% based on LLM response confidence scores, if the model provides them), mark as "Unknown" rather than hallucinating values. If the LLM model does not provide confidence scores, fallback to validation heuristics (pattern matching, keyword presence, format validation) to estimate confidence.  
   - Categorization metadata must also be included in the `EventComplete` payload and `--summary-json` output for programmatic access.
+- **FR-017 – 4-Column Table Structure**
+  - Extract specifications into a 4-column table format: `| Category | Specification | Value | Key Features |`.
+  - The 4th column (`Key Features`) must contain descriptive text, marketing highlights, or "Key Features" associated with the specific specification row.
+  - This ensures that when data is ingested into a database, the qualitative context (e.g., "delivering high-quality graphics") is preserved alongside the quantitative value (e.g., "31.24 cm").
+  - If no specific key feature is associated with a row, the cell should be left empty or contain a relevant summary from the "Key Features" section if applicable to that specific spec.
+- **FR-018 – Redundant Data Removal**
+  - Implement post-processing logic to detect and remove redundant specification entries across pages.
+  - If a specification (Category + Specification + Value) matches an entry from a previous page, it should be excluded from the subsequent page's output to prevent database bloating.
+  - Exception: If the context or "Key Features" differ significantly, it may be retained, but strict exact-match deduplication is the baseline.
 
 ## 9. Non-Functional Requirements
 
