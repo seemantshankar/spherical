@@ -1,7 +1,7 @@
 # PDF Specification Extractor – Delivery Plan
 
-- **Document Version**: 1.0  
-- **Last Updated**: 2025-11-23  
+- **Document Version**: 1.1  
+- **Last Updated**: 2025-11-24  
 - **Owner**: Delivery Lead – PDF Extractor
 
 ## 1. Summary
@@ -19,15 +19,17 @@ Milestones:
 | M1 – Core Extraction | 2025-11-28 | CLI renders JPGs ≥85 quality, LLM returns Markdown |
 | M2 – Streaming & Events | 2025-12-02 | Library channel events documented and validated |
 | M3 – Resilience & QA | 2025-12-06 | Retry logic, cleanup guarantees, SC-001…SC-005 met |
+| M4 – Document Categorization | 2025-12-10 | Automatic categorization (Domain, Subdomain, Country Code, Model Year, Condition, Make, Model) detected and included in Markdown header, EventComplete payload, and summary JSON (FR-016) |
 
 ## 2. Project Structure
 
 | Component | Responsibilities | Hand-off |
 |-----------|------------------|----------|
 | CLI | Argument parsing, env loading, writing Markdown files, surfacing progress spinners. | CLI owns temp directory lifecycle, output naming, and human logs. |
-| Library API | PDF conversion orchestration, LLM calls, event fan-out, returning aggregated structs (`Markdown`, `Tables`, `USPs`). | Library never persists files; embedders decide on storage. |
+| Library API | PDF conversion orchestration, LLM calls, event fan-out, returning aggregated structs (`Markdown`, `Tables`, `USPs`, `DocumentMetadata`). | Library never persists files; embedders decide on storage. |
 | Streaming UX | Shared event schema consumed by CLI (spinner) and library embedder callbacks. | Event ordering enforced: Start → PageProcessing → LLMStreaming → PageComplete → Complete/Error. |
 | Temp Artifacts | `./tmp/<pdf>/...` tree shared between CLI/library but orchestrated inside `internal/extract`. | Cleanup triggered when CLI exit status = 0; non-zero leaves breadcrumbs for operators. |
+| Document Categorization | LLM-based analysis of cover page (fallback to first page if cover blank/unreadable; continue to subsequent pages sequentially until clear categorization information is found) to extract Domain, Subdomain, Country Code, Model Year, Condition, Make, Model. Uses majority vote across pages for conflict resolution. Injects YAML frontmatter header into Markdown output. Confidence threshold >70% based on LLM response scores (heuristic fallback if unavailable). | Categorization metadata included in `EventComplete` payload and `--summary-json` output for programmatic access. Validation: ISO 3166-1 alpha-2 for country codes, predefined domain list, reasonable model year range (1900-2100). |
 
 ## 3. Technical Context
 
@@ -36,6 +38,7 @@ Milestones:
 - **LLM Access**: OpenRouter (Gemini 2.5 Flash default). Config fallback to Gemini 2.5 Pro when higher accuracy needed; CLI flag `--model`.
 - **Image Quality Control**: `--jpg-quality` flag propagates to converter; recommended range 80–95. Provide doc table mapping scenarios → quality (e.g., “low-contrast scans: 92”, “200+ pages: 82”).
 - **Temporary Markdown Files**: Ownership, naming, retention spelled out to align FR-006/FR-012.
+- **Document Categorization**: YAML frontmatter format (between `---` delimiters) for categorization header. LLM confidence scores (>70% threshold) with heuristic fallback. Cover page precedence with sequential page fallback (first page, then subsequent pages until clear categorization information is found). Majority vote conflict resolution across pages. Domain-specific validation (ISO 3166-1 alpha-2 country codes, predefined domains, reasonable model year range).
 
 ## 4. Dependencies & Compatibility
 
@@ -74,6 +77,7 @@ Milestones:
 - **Task T3 – Temp Markdown Lifecycle**: Directory creation, retention policies, CLI flag to keep artifacts (Owner: Platform).
 - **Task T4 – Streaming UX**: Align CLI spinner + JSON events, document event order (Owner: Developer Experience).
 - **Task T5 – QA Harness**: Maintain benchmark data, sampling scripts (Owner: QA).
+- **Task T6 – Document Categorization**: Implement automatic document categorization (Domain, Subdomain, Country Code, Model Year, Condition, Make, Model) detection via LLM analysis of cover page (fallback to first page, then continue sequentially to subsequent pages until clear categorization information is found). Use LLM confidence scores (>70% threshold) with heuristic fallback. Implement majority vote conflict resolution across pages. Inject YAML frontmatter header (between `---` delimiters) at top of Markdown output. Include validation helpers (ISO 3166-1 alpha-2 country codes, predefined domains, model year range 1900-2100). Include in `EventComplete` payload and `--summary-json` (Owner: LLM team, dependencies: T2).
 
 ## 9. Communication & Reporting
 
