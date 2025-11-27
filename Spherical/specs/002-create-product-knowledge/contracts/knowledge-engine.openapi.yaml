@@ -1,0 +1,421 @@
+openapi: 3.1.0
+info:
+  title: Product Knowledge Engine API
+  version: 0.1.0
+  description: >
+    Hybrid retrieval + ingestion service powering the AI sales agent.
+    All endpoints require authentication (mTLS or OAuth2) and enforce multi-tenant
+    row-level security via `tenantId` path or body fields.
+servers:
+  - url: https://api.spherical.local/v1
+    description: Local dev / test environment
+  - url: https://api.spherical.ai/v1
+    description: Production
+security:
+  - bearerAuth: []
+
+paths:
+  /tenants/{tenantId}/products/{productId}/campaigns/{campaignId}/ingest:
+    post:
+      summary: Ingest brochure-derived Markdown into a campaign
+      operationId: ingestCampaign
+      tags: [Ingestion]
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: productId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: campaignId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestionRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionJob'
+        '409':
+          description: Duplicate hash / conflicting draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tenants/{tenantId}/campaigns/{campaignId}/publish:
+    post:
+      summary: Promote a campaign draft to published
+      operationId: publishCampaign
+      tags: [Ingestion]
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: campaignId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, approvedBy]
+              properties:
+                version:
+                  type: integer
+                  minimum: 1
+                approvedBy:
+                  type: string
+                releaseNotes:
+                  type: string
+      responses:
+        '200':
+          description: Published version payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignVersion'
+        '412':
+          description: Validation errors (open conflicts / missing lineage)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /retrieval/query:
+    post:
+      summary: Retrieve structured + semantic context for an agent query
+      operationId: queryKnowledge
+      tags: [Retrieval]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetrievalRequest'
+      responses:
+        '200':
+          description: Context bundle ready for the LLM
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrievalResponse'
+        '403':
+          description: Tenant does not have access to requested product(s)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /comparisons/query:
+    post:
+      summary: Request cross-product comparison rows
+      operationId: compareProducts
+      tags: [Retrieval]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantId, primaryProductId, secondaryProductId]
+              properties:
+                tenantId:
+                  type: string
+                primaryProductId:
+                  type: string
+                secondaryProductId:
+                  type: string
+                dimensions:
+                  type: array
+                  items:
+                    type: string
+                maxRows:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Comparison rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comparisons:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ComparisonRow'
+        '404':
+          description: No shareable data between requested products
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /lineage/{resourceType}/{resourceId}:
+    get:
+      summary: Fetch lineage details for any stored resource
+      operationId: getLineage
+      tags: [Governance]
+      parameters:
+        - name: resourceType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [spec_value, feature_block, knowledge_chunk, comparison]
+        - name: resourceId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: tenantId
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Lineage history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resourceId: { type: string }
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LineageEvent'
+        '404':
+          description: Resource not found for tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /health:
+    get:
+      summary: Liveness + dependency probes
+      tags: [Ops]
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  postgres:
+                    type: string
+                  redis:
+                    type: string
+                  embeddings:
+                    type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    IngestionRequest:
+      type: object
+      required:
+        - documentSource
+        - markdownUrl
+        - operator
+      properties:
+        documentSource:
+          type: object
+          required: [id, sha256]
+          properties:
+            id: { type: string, format: uuid }
+            sha256: { type: string }
+        markdownUrl:
+          type: string
+          format: uri
+        overwriteDraft:
+          type: boolean
+          default: false
+        autoPublish:
+          type: boolean
+          default: false
+        operator:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    IngestionJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, running, failed, succeeded]
+        startedAt:
+          type: string
+          format: date-time
+        etaSeconds:
+          type: integer
+        conflictingSpecIds:
+          type: array
+          items: { type: string, format: uuid }
+    CampaignVersion:
+      type: object
+      properties:
+        campaignId: { type: string }
+        version: { type: integer }
+        status: { type: string, enum: [draft, published, archived] }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveThrough: { type: string, format: date-time, nullable: true }
+        publishedBy: { type: string }
+    RetrievalRequest:
+      type: object
+      required: [tenantId, question]
+      properties:
+        tenantId:
+          type: string
+        productIds:
+          type: array
+          items: { type: string }
+        campaignVariantId:
+          type: string
+        question:
+          type: string
+        intentHint:
+          type: string
+          enum: [spec_lookup, usp_lookup, comparison, faq, unknown]
+        conversationContext:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { type: string }
+              content: { type: string }
+        filters:
+          type: object
+          properties:
+            categories:
+              type: array
+              items: { type: string }
+            chunkTypes:
+              type: array
+              items:
+                type: string
+        maxChunks:
+          type: integer
+          default: 6
+        includeLineage:
+          type: boolean
+          default: true
+    RetrievalResponse:
+      type: object
+      properties:
+        intent:
+          type: string
+        latencyMs:
+          type: integer
+        structuredFacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpecFact'
+        semanticChunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/SemanticChunk'
+        comparisons:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComparisonRow'
+        lineage:
+          type: array
+          items:
+            $ref: '#/components/schemas/LineageEvent'
+    SpecFact:
+      type: object
+      properties:
+        specItemId: { type: string }
+        category: { type: string }
+        name: { type: string }
+        value: { type: string }
+        unit: { type: string }
+        confidence: { type: number, format: float }
+        campaignVariantId: { type: string }
+        source:
+          $ref: '#/components/schemas/SourceRef'
+    SemanticChunk:
+      type: object
+      properties:
+        chunkId: { type: string }
+        chunkType: { type: string }
+        text: { type: string }
+        distance: { type: number, format: float }
+        metadata:
+          type: object
+          additionalProperties: true
+        source:
+          $ref: '#/components/schemas/SourceRef'
+    ComparisonRow:
+      type: object
+      properties:
+        dimension: { type: string }
+        primaryProductId: { type: string }
+        secondaryProductId: { type: string }
+        primaryValue: { type: string }
+        secondaryValue: { type: string }
+        verdict:
+          type: string
+          enum: [primary_better, secondary_better, equal, cannot_compare]
+        narrative: { type: string }
+        shareability: { type: string }
+        source:
+          type: object
+          properties:
+            primarySpecId: { type: string }
+            secondarySpecId: { type: string }
+    LineageEvent:
+      type: object
+      properties:
+        id: { type: string }
+        resourceType: { type: string }
+        resourceId: { type: string }
+        action:
+          type: string
+          enum: [created, updated, deleted, reconciled]
+        operator: { type: string }
+        occurredAt: { type: string, format: date-time }
+        documentSourceId: { type: string }
+        ingestionJobId: { type: string }
+        diff:
+          type: object
+          additionalProperties: true
+    SourceRef:
+      type: object
+      properties:
+        documentSourceId: { type: string }
+        page: { type: integer }
+        url: { type: string, format: uri, nullable: true }
+    Error:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+        correlationId: { type: string }
+
