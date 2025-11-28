@@ -181,7 +181,7 @@ func TestEndToEndCamryIngestionAndRetrieval(t *testing.T) {
 		{"What is the kerb weight?", "spec_lookup", "kg"},
 		{"What is the wheelbase?", "spec_lookup", "2.825"},
 		{"What transmission does it have?", "spec_lookup", "CVT"},
-		
+
 		// Feature lookups
 		{"What safety features does the Camry have?", "feature", "Safety"},
 		{"Does it have Apple CarPlay?", "feature", "CarPlay"},
@@ -189,17 +189,17 @@ func TestEndToEndCamryIngestionAndRetrieval(t *testing.T) {
 		{"What is the display size?", "spec_lookup", "cm"},
 		{"Does it have sunroof?", "feature", "Moon"},
 		{"What audio system does it have?", "feature", "JBL"},
-		
+
 		// Hybrid-specific
 		{"Tell me about the hybrid system", "semantic", "hybrid"},
 		{"What is the battery type?", "spec_lookup", "lithium"},
 		{"What is the combined power output?", "spec_lookup", "169"},
 		{"What drive modes are available?", "spec_lookup", "Sport"},
-		
+
 		// USP/Why buy queries
 		{"Why should I buy the Camry over competitors?", "usp", ""},
 		{"What is the warranty coverage?", "faq", ""},
-		
+
 		// Edge cases
 		{"What colors are available?", "spec_lookup", "Grey"},
 		{"Does it have lane assist?", "feature", "Lane"},
@@ -323,7 +323,7 @@ func TestEndToEndCamryIngestionAndRetrieval(t *testing.T) {
 	if accuracyRate < 60 {
 		t.Errorf("Accuracy too low: %.1f%% (expected > 60%%)", accuracyRate)
 	}
-	
+
 	t.Log("\n✅ End-to-end test completed successfully!")
 }
 
@@ -698,7 +698,7 @@ func extractKeywords(query string) []string {
 		word = strings.Trim(word, "?.,!")
 		if len(word) > 2 && !stopWords[word] {
 			keywords = append(keywords, word)
-			
+
 			// Add singular form if word ends in 's' (simple stemming)
 			if strings.HasSuffix(word, "s") && len(word) > 3 {
 				singular := word[:len(word)-1]

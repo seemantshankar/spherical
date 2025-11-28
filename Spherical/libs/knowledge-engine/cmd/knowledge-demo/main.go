@@ -14,10 +14,12 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/cache"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/embedding"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/ingest"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/observability"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/retrieval"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/storage"
 )
 
 const (
@@ -38,6 +40,8 @@ type KnowledgeBase struct {
 	campaignID    uuid.UUID
 	embedder      embedding.Embedder
 	vectorAdapter *retrieval.FAISSAdapter
+	router        *retrieval.Router
+	specViewRepo  *storage.SpecViewRepository
 }
 
 type scoredSpec struct {
@@ -80,10 +84,13 @@ func main() {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	var embedder embedding.Embedder
 	if apiKey != "" {
+		// Google Gemini embedding-001 - dimension will be detected from API response
+		// Don't set dimension here, let it be auto-detected from first embedding
 		client, err := embedding.NewClient(embedding.Config{
 			APIKey:  apiKey,
 			Model:   "google/gemini-embedding-001",
 			BaseURL: "https://openrouter.ai/api/v1",
+			// Dimension: not set - will be detected from API response
 		})
 		if err == nil {
 			embedder = client
@@ -95,13 +102,50 @@ func main() {
 		fmt.Printf("%s⚠ Using mock embeddings (set OPENROUTER_API_KEY for real embeddings)%s\n", colorYellow, colorReset)
 	}
 
-	// Initialize vector adapter
-	vectorAdapter, _ := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{Dimension: 768})
+	// Initialize vector adapter - dimension will be set dynamically when first embedding is generated
+	// Start with a default that matches the embedder, but it will be updated on first use
+	embedderDimension := 768 // Default fallback
+	if embedder != nil {
+		embedderDimension = embedder.Dimension()
+	}
+	vectorAdapter, _ := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{Dimension: embedderDimension})
+
+	// Create spec view repository
+	specViewRepo := storage.NewSpecViewRepository(db)
+
+	// Create cache
+	memCache := cache.NewMemoryClient(1000)
+
+	// Create logger for router
+	routerLogger := observability.NewLogger(observability.LogConfig{
+		Level:       "info",
+		Format:      "console",
+		ServiceName: "knowledge-demo-router",
+	})
+
+	// Create router with production configuration
+	router := retrieval.NewRouter(
+		routerLogger,
+		memCache,
+		vectorAdapter,
+		embedder, // Pass embedder for vector search
+		specViewRepo,
+		retrieval.RouterConfig{
+			StructuredFirst:           true,
+			SemanticFallback:          true,
+			IntentConfidenceThreshold: 0.7,
+			KeywordConfidenceThreshold: 0.8,
+			CacheResults:             true,
+			CacheTTL:                 5 * time.Minute,
+		},
+	)
 
 	kb := &KnowledgeBase{
 		db:            db,
 		embedder:      embedder,
 		vectorAdapter: vectorAdapter,
+		router:        router,
+		specViewRepo:  specViewRepo,
 	}
 
 	// Check if we need to ingest data
@@ -147,13 +191,25 @@ func main() {
 		}
 
 		// Special commands
+		if query == "stats" {
+			kb.printStats()
+			continue
+		}
+		if query == "reload" {
+			fmt.Println(colorYellow + "Reloading data..." + colorReset)
+			kb.loadData(ctx)
+			kb.printStats()
+			continue
+		}
+
+		// Handle slash commands
 		if strings.HasPrefix(query, "/") {
 			kb.handleCommand(query)
 			continue
 		}
 
-		// Run query
-		kb.runQuery(ctx, query)
+		// Use Router to process regular queries
+		kb.runQueryWithRouter(ctx, query)
 	}
 }
 
@@ -241,8 +297,13 @@ func (kb *KnowledgeBase) loadData(ctx context.Context) {
 }
 
 func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
-	// Find brochure
+	// Find brochure - prioritize camry-output-v3.md which has all 49 USPs
 	brochurePaths := []string{
+		"../pdf-extractor/camry-output-v3.md",
+		"../../pdf-extractor/camry-output-v3.md",
+		"../../../pdf-extractor/camry-output-v3.md",
+		"pdf-extractor/camry-output-v3.md",
+		// Fallback to older file if camry-output-v3.md not found
 		"../../e-brochure-camry-hybrid-specs.md",
 		"../../../e-brochure-camry-hybrid-specs.md",
 		"../../../../e-brochure-camry-hybrid-specs.md",
@@ -405,15 +466,24 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 			if e, err := kb.embedder.EmbedSingle(ctx, usp.Body); err == nil {
 				emb = e
 				embVector, _ = json.Marshal(emb)
+			} else {
+				// Log embedding errors but continue - USP can still be stored without embedding
+				fmt.Printf("\nWarning: Failed to generate embedding for USP: %v\n", err)
 			}
 		}
-		kb.db.Exec(`INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, 
+		
+		// Insert into database with error checking
+		_, err := kb.db.Exec(`INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, 
 			chunk_type, text, embedding_vector, embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			chunkID.String(), kb.tenantID.String(), kb.productID.String(), kb.campaignID.String(),
 			"usp", usp.Body, embVector, kb.embedder.Model())
+		if err != nil {
+			fmt.Printf("\nError storing USP in database: %v\n", err)
+			continue // Skip this USP if database insert fails
+		}
 
 		if len(emb) > 0 {
-			kb.vectorAdapter.Insert(ctx, []retrieval.VectorEntry{{
+			if err := kb.vectorAdapter.Insert(ctx, []retrieval.VectorEntry{{
 				ID:                chunkID,
 				TenantID:          kb.tenantID,
 				ProductID:         kb.productID,
@@ -421,7 +491,9 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 				ChunkType:         "usp",
 				Vector:            emb,
 				Metadata:          map[string]interface{}{"type": "usp"},
-			}})
+			}}); err != nil {
+				fmt.Printf("\nError inserting USP into vector adapter: %v\n", err)
+			}
 		}
 
 		chunkCount++
@@ -441,297 +513,97 @@ func (kb *KnowledgeBase) printStats() {
 	fmt.Printf("   Knowledge Chunks: %d\n", chunkCount)
 }
 
-func (kb *KnowledgeBase) runQuery(ctx context.Context, query string) {
-	start := time.Now()
+// runQueryWithRouter uses the production Router to process queries.
+func (kb *KnowledgeBase) runQueryWithRouter(ctx context.Context, query string) {
+	if kb.router == nil {
+		fmt.Printf("%sError: Router not initialized%s\n", colorRed, colorReset)
+		return
+	}
 
-	keywords := extractKeywords(query)
+	// Create retrieval request
+	// For USP queries, request more chunks to get all USPs
+	maxChunks := 10
+	if strings.Contains(strings.ToLower(query), "usp") || strings.Contains(strings.ToLower(query), "unique selling") {
+		maxChunks = 50 // Get all USPs
+	}
+	req := retrieval.RetrievalRequest{
+		TenantID:          kb.tenantID,
+		ProductIDs:        []uuid.UUID{kb.productID},
+		CampaignVariantID: &kb.campaignID,
+		Question:          query,
+		MaxChunks:         maxChunks,
+	}
 
-	// Also search for compound terms (e.g., "android auto", "apple carplay")
-	compoundTerms := extractCompoundTerms(query)
+	// Query using Router
+	resp, err := kb.router.Query(ctx, req)
+	if err != nil {
+		fmt.Printf("%sError: %v%s\n", colorRed, err, colorReset)
+		return
+	}
 
-	// Filter out keywords that are parts of compound terms to avoid false positives
-	// e.g., if "android auto" is detected, don't search for just "auto"
-	filteredKeywords := filterKeywordsByCompound(keywords, compoundTerms)
+	// Display results
+	fmt.Printf("\n%s📊 Results (Intent: %s, Latency: %dms)%s\n", colorBold, resp.Intent, resp.LatencyMs, colorReset)
 
-	// Search specs with relevance scoring
-	specMap := make(map[string]*scoredSpec) // Use key to deduplicate
+	// Show structured facts
+	if len(resp.StructuredFacts) > 0 {
+		fmt.Printf("\n%s📋 Structured Facts:%s\n", colorBold, colorReset)
+		for i, fact := range resp.StructuredFacts {
+			if i >= 10 {
+				break
+			}
+			fmt.Printf("  %s%s%s: %s%s %s%s\n",
+				colorCyan, fact.Category, colorReset,
+				colorGreen, fact.Name, colorReset,
+				fact.Value)
+			if fact.Unit != "" {
+				fmt.Printf("    %s%s%s\n", colorYellow, fact.Unit, colorReset)
+			}
+		}
+	}
 
-	// Vector Search (Semantic)
-	if kb.vectorAdapter != nil && kb.embedder != nil {
-		emb, err := kb.embedder.EmbedSingle(ctx, query)
-		if err == nil {
-			// Search for top 20 matches
-			results, _ := kb.vectorAdapter.Search(ctx, emb, 20, retrieval.VectorFilters{
-				TenantID:          &kb.tenantID,
-				CampaignVariantID: &kb.campaignID,
-			})
-
-			for _, res := range results {
-				score := int(res.Score * 20) // Base score on similarity (0-20)
-
-				if specID, ok := res.Metadata["spec_value_id"].(string); ok {
-					// It's a spec row
-					var s scoredSpec
-					err := kb.db.QueryRow(`
-						SELECT sc.name, si.display_name, sv.value_text, COALESCE(sv.unit, ''), sv.confidence 
-						FROM spec_values sv 
-						JOIN spec_items si ON sv.spec_item_id = si.id
-						JOIN spec_categories sc ON si.category_id = sc.id
-						WHERE sv.id = ?`, specID).Scan(&s.Category, &s.Name, &s.Value, &s.Unit, &s.Confidence)
-
-					if err == nil {
-						s.Score = score + 5 // Boost vector matches
-						key := s.Category + "|" + s.Name + "|" + s.Value
-						if existing, ok := specMap[key]; ok {
-							if s.Score > existing.Score {
-								existing.Score = s.Score
-							}
-						} else {
-							specMap[key] = &s
-						}
-					}
+	// Show semantic chunks
+	if len(resp.SemanticChunks) > 0 {
+		fmt.Printf("\n%s💡 Related Information:%s\n", colorBold, colorReset)
+		// For USP queries, show all chunks; for others, limit to 5
+		maxDisplay := 5
+		if resp.Intent == retrieval.IntentUSPLookup {
+			maxDisplay = 100 // Show all USPs
+		}
+		for i, chunk := range resp.SemanticChunks {
+			if i >= maxDisplay {
+				break
+			}
+			// Get chunk text from database (it's not included in VectorResult)
+			var chunkText string
+			err := kb.db.QueryRow("SELECT text FROM knowledge_chunks WHERE id = ?", chunk.ChunkID.String()).Scan(&chunkText)
+			if err == nil && chunkText != "" {
+				// Truncate long text for display
+				if len(chunkText) > 200 {
+					chunkText = chunkText[:197] + "..."
 				}
-			}
-		}
-	}
-
-	// First, search for compound terms (higher priority)
-	for _, term := range compoundTerms {
-		rows, err := kb.db.Query(`
-			SELECT DISTINCT sc.name, si.display_name, sv.value_text, COALESCE(sv.unit, ''), sv.confidence
-			FROM spec_values sv
-			JOIN spec_items si ON sv.spec_item_id = si.id
-			JOIN spec_categories sc ON si.category_id = sc.id
-			WHERE sv.tenant_id = ? AND sv.campaign_variant_id = ?
-			  AND (LOWER(si.display_name) LIKE ? OR LOWER(sc.name) LIKE ? OR LOWER(sv.value_text) LIKE ?)
-			ORDER BY sv.confidence DESC
-			LIMIT 20
-		`, kb.tenantID.String(), kb.campaignID.String(), "%"+term+"%", "%"+term+"%", "%"+term+"%")
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var s struct {
-				Category   string
-				Name       string
-				Value      string
-				Unit       string
-				Confidence float64
-			}
-			if rows.Scan(&s.Category, &s.Name, &s.Value, &s.Unit, &s.Confidence) == nil {
-				key := s.Category + "|" + s.Name + "|" + s.Value
-				if existing, ok := specMap[key]; ok {
-					existing.Score += 5 // Compound term matches = much higher score
-				} else {
-					specMap[key] = &scoredSpec{
-						Category:   s.Category,
-						Name:       s.Name,
-						Value:      s.Value,
-						Unit:       s.Unit,
-						Confidence: s.Confidence,
-						Score:      5, // High score for compound term match
-					}
+				typeIcon := "📝"
+				if string(chunk.ChunkType) == "usp" {
+					typeIcon = "⭐"
 				}
+				fmt.Printf("  %s %s\n", typeIcon, chunkText)
 			}
 		}
-		rows.Close()
-	}
-
-	// Then search for individual keywords
-	for _, keyword := range filteredKeywords {
-		// Skip very common words that cause noise
-		if keyword == "features" || keyword == "feature" {
-			continue
-		}
-		rows, err := kb.db.Query(`
-			SELECT DISTINCT sc.name, si.display_name, sv.value_text, COALESCE(sv.unit, ''), sv.confidence
-			FROM spec_values sv
-			JOIN spec_items si ON sv.spec_item_id = si.id
-			JOIN spec_categories sc ON si.category_id = sc.id
-			WHERE sv.tenant_id = ? AND sv.campaign_variant_id = ?
-			  AND (LOWER(si.display_name) LIKE ? OR LOWER(sc.name) LIKE ? OR LOWER(sv.value_text) LIKE ?)
-			ORDER BY sv.confidence DESC
-			LIMIT 15
-		`, kb.tenantID.String(), kb.campaignID.String(), "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var s struct {
-				Category   string
-				Name       string
-				Value      string
-				Unit       string
-				Confidence float64
-			}
-			if rows.Scan(&s.Category, &s.Name, &s.Value, &s.Unit, &s.Confidence) == nil {
-				key := s.Category + "|" + s.Name + "|" + s.Value
-				if existing, ok := specMap[key]; ok {
-					existing.Score++ // Multiple keyword matches = higher score
-				} else {
-					score := 1
-					// Boost score if matches category (more relevant)
-					if strings.Contains(strings.ToLower(s.Category), strings.ToLower(keyword)) {
-						score += 2
-					}
-					// Boost score if matches name (very relevant)
-					if strings.Contains(strings.ToLower(s.Name), strings.ToLower(keyword)) {
-						score += 2
-					}
-					specMap[key] = &scoredSpec{
-						Category:   s.Category,
-						Name:       s.Name,
-						Value:      s.Value,
-						Unit:       s.Unit,
-						Confidence: s.Confidence,
-						Score:      score,
-					}
-				}
-			}
-		}
-		rows.Close()
-	}
-
-	// Convert to slice and sort by score
-	var specs []scoredSpec
-	for _, s := range specMap {
-		specs = append(specs, *s)
-	}
-	
-	// Sort by score (descending), then by confidence
-	for i := 0; i < len(specs)-1; i++ {
-		for j := i + 1; j < len(specs); j++ {
-			if specs[i].Score < specs[j].Score || 
-			   (specs[i].Score == specs[j].Score && specs[i].Confidence < specs[j].Confidence) {
-				specs[i], specs[j] = specs[j], specs[i]
-			}
-		}
-	}
-	
-	// Limit to top 10 most relevant
-	if len(specs) > 10 {
-		specs = specs[:10]
-	}
-
-	// Search chunks - first try compound terms, then individual keywords
-	var chunks []struct {
-		Type string
-		Text string
-	}
-
-	// Vector Search for Chunks
-	if kb.vectorAdapter != nil && kb.embedder != nil {
-		emb, err := kb.embedder.EmbedSingle(ctx, query)
-		if err == nil {
-			results, _ := kb.vectorAdapter.Search(ctx, emb, 10, retrieval.VectorFilters{
-				TenantID:          &kb.tenantID,
-				CampaignVariantID: &kb.campaignID,
-				ChunkTypes:        []string{"feature_block", "usp", "faq"}, // Exclude spec_row
-			})
-			for _, res := range results {
-				var text, chunkType string
-				kb.db.QueryRow("SELECT text, chunk_type FROM knowledge_chunks WHERE id = ?", res.ID).Scan(&text, &chunkType)
-				if text != "" {
-					chunks = append(chunks, struct{Type string; Text string}{chunkType, text})
-				}
-			}
+		if resp.Intent == retrieval.IntentUSPLookup && len(resp.SemanticChunks) > maxDisplay {
+			fmt.Printf("  ... and %d more USP(s)\n", len(resp.SemanticChunks)-maxDisplay)
 		}
 	}
 
-	// Try compound terms first (higher priority)
-	for _, term := range compoundTerms {
-		rows, err := kb.db.Query(`
-			SELECT DISTINCT chunk_type, text
-			FROM knowledge_chunks
-			WHERE tenant_id = ? AND campaign_variant_id = ?
-			  AND LOWER(text) LIKE ?
-			LIMIT 5
-		`, kb.tenantID.String(), kb.campaignID.String(), "%"+term+"%")
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var c struct {
-				Type string
-				Text string
-			}
-			if rows.Scan(&c.Type, &c.Text) == nil {
-				chunks = append(chunks, c)
-			}
-		}
-		rows.Close()
-	}
-
-	// Then try individual keywords
-	for _, keyword := range keywords {
-		rows, err := kb.db.Query(`
-			SELECT DISTINCT chunk_type, text
-			FROM knowledge_chunks
-			WHERE tenant_id = ? AND campaign_variant_id = ?
-			  AND LOWER(text) LIKE ?
-			LIMIT 3
-		`, kb.tenantID.String(), kb.campaignID.String(), "%"+keyword+"%")
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var c struct {
-				Type string
-				Text string
-			}
-			if rows.Scan(&c.Type, &c.Text) == nil {
-				chunks = append(chunks, c)
-			}
-		}
-		rows.Close()
-	}
-
-	elapsed := time.Since(start)
-
-	// Print results
-	fmt.Printf("\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", colorCyan, colorReset)
-	fmt.Printf("%sResults for:%s %s\n", colorBold, colorReset, query)
-	fmt.Printf("%s(found in %v)%s\n", colorPurple, elapsed, colorReset)
-	fmt.Printf("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", colorCyan, colorReset)
-
-	// Filter out irrelevant categories for specific queries
-	filteredSpecs := filterRelevantSpecs(specs, query, filteredKeywords)
-	
-	if len(filteredSpecs) > 0 {
-		fmt.Printf("\n%s📋 Specifications:%s\n", colorGreen, colorReset)
-		for _, s := range filteredSpecs {
-			unit := ""
-			if s.Unit != "" {
-				unit = " " + s.Unit
-			}
-			fmt.Printf("   • %s%s%s > %s: %s%s%s%s\n",
-				colorYellow, s.Category, colorReset,
-				s.Name, colorBold, s.Value, unit, colorReset)
-		}
-	}
-
-	if len(chunks) > 0 {
-		fmt.Printf("\n%s💡 Related Information:%s\n", colorBlue, colorReset)
-		seen := make(map[string]bool)
-		for _, c := range chunks {
-			if seen[c.Text] {
-				continue
-			}
-			seen[c.Text] = true
-			typeIcon := "📝"
-			if c.Type == "usp" {
-				typeIcon = "⭐"
-			}
-			fmt.Printf("   %s %s\n", typeIcon, c.Text)
-		}
-	}
-
-	if len(specs) == 0 && len(chunks) == 0 {
-		fmt.Printf("\n%s❌ No results found for this query.%s\n", colorRed, colorReset)
-		fmt.Println("   Try rephrasing your question or use more specific terms.")
+	// Show if no results
+	if len(resp.StructuredFacts) == 0 && len(resp.SemanticChunks) == 0 {
+		fmt.Printf("%s⚠ No results found. Try rephrasing your question.%s\n", colorYellow, colorReset)
 	}
 
 	fmt.Println()
+}
+
+// runQuery is kept for backward compatibility but now delegates to Router.
+func (kb *KnowledgeBase) runQuery(ctx context.Context, query string) {
+	kb.runQueryWithRouter(ctx, query)
 }
 
 func (kb *KnowledgeBase) handleCommand(cmd string) {
@@ -1047,6 +919,34 @@ func runMigrations(db *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_spec_values_search ON spec_values(tenant_id, campaign_variant_id, status);
 	CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_search ON knowledge_chunks(tenant_id, campaign_variant_id);
+
+	-- Create spec_view_latest as a regular view (SQLite doesn't support materialized views)
+	CREATE VIEW IF NOT EXISTS spec_view_latest AS
+	SELECT 
+		sv.id,
+		sv.tenant_id,
+		sv.product_id,
+		sv.campaign_variant_id,
+		sv.spec_item_id,
+		si.display_name AS spec_name,
+		sc.name AS category_name,
+		COALESCE(sv.value_text, CAST(sv.value_numeric AS TEXT)) AS value,
+		sv.unit,
+		sv.confidence,
+		sv.source_doc_id,
+		sv.source_page,
+		sv.version,
+		cv.locale,
+		cv.trim,
+		cv.market,
+		p.name AS product_name
+	FROM spec_values sv
+	JOIN spec_items si ON sv.spec_item_id = si.id
+	JOIN spec_categories sc ON si.category_id = sc.id
+	JOIN campaign_variants cv ON sv.campaign_variant_id = cv.id
+	JOIN products p ON sv.product_id = p.id
+	WHERE sv.status = 'active'
+	  AND cv.status = 'published';
 	`
 
 	_, err := db.Exec(migrations)

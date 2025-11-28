@@ -103,6 +103,9 @@ Compliance analysts can trace any response back to the brochure page or upload e
 - **FR-004**: System MUST version campaign data (`version`, `effective_from`, `effective_through`, `is_draft`) and expose publish/rollback operations.
 - **FR-005**: System MUST store unstructured snippets in `knowledge_chunks` with embeddings, metadata JSON (category, trim, source_page, chunk_type), and `embedding_version`.
 - **FR-006**: Retrieval API MUST route each query through intent classification and choose SQL, vector, or hybrid execution paths with configurable thresholds (structured first, semantic fallback).
+- **FR-006a**: Router MUST calculate keyword search confidence based on exact matches, partial matches, query complexity, and result count, and return early when confidence exceeds `KeywordConfidenceThreshold` (default 0.8) to avoid unnecessary vector search.
+- **FR-006b**: Router MUST only cache vector search results (not keyword-only results) with configurable TTL (default 5-10 minutes) to optimize latency for complex queries while keeping simple queries fast.
+- **FR-006c**: `knowledge-demo` CLI MUST use the production Router directly (not a simplified version) to ensure consistent behavior and production parity.
 - **FR-007**: Vector queries MUST support filtered search (tenant/product/campaign + optional chunk_type) and return top-k ≤ 8 with scoring metadata.
 - **FR-008**: Structured spec queries MUST respond within 120 ms p50 (SQLite) and 80 ms p50 (Postgres+PGVector) for single product lookups.
 - **FR-009**: Comparison service MUST assemble `comparisons` rows for approved product pairs and provide templated deltas (better/worse/equal) for the LLM prompt.
@@ -142,6 +145,8 @@ Compliance analysts can trace any response back to the brochure page or upload e
 
 - **SC-001**: Ingestion of a 20-page brochure to published status completes in ≤15 minutes end-to-end (including validations and deduping) on reference hardware.
 - **SC-002**: Retrieval API p50 latency ≤150 ms and p95 ≤350 ms for single-product queries under a 200 RPS mixed workload.
+- **SC-002a**: Simple keyword queries (confidence ≥0.8) MUST achieve p50 latency ≤25 ms by skipping vector search.
+- **SC-002b**: Router MUST track metrics for path distribution (keyword-only %, hybrid %, vector-only %), average latency per path, and confidence score distribution.
 - **SC-003**: ≥95% of agent responses referencing structured specs cite the latest published version (verified via nightly QA replay).
 - **SC-004**: ≥80% of comparative queries automatically route through approved benchmark data with zero cross-tenant leakage incidents per quarter.
 - **SC-005**: Drift monitor surfaces ≥90% of campaigns older than 180 days and triggers notifications within 1 hour of detection.

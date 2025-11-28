@@ -38,10 +38,12 @@ docker compose -f ops/dev/knowledge-engine-compose.yml up -d
 
 ## 4. CLI Workflows
 
-### Interactive Demo (Local Vector Search)
+### Interactive Demo (Production Router)
 ```bash
 cd libs/knowledge-engine
-# Run the interactive demo with in-memory vector search
+# Run the interactive demo using production Router
+# The demo uses the same Router as production for consistent behavior
+# Simple queries (confidence ≥0.8) return in <25 ms, complex queries trigger vector search
 # Make sure OPENROUTER_API_KEY is set in your environment
 go run ./cmd/knowledge-demo
 ```

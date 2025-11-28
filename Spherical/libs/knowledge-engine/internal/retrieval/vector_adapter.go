@@ -99,8 +99,48 @@ func NewFAISSAdapter(cfg FAISSConfig) (*FAISSAdapter, error) {
 
 // Search finds the k nearest neighbors using cosine similarity.
 func (a *FAISSAdapter) Search(ctx context.Context, query []float32, k int, filters VectorFilters) ([]VectorResult, error) {
+	a.mu.RLock()
+	hasVectors := len(a.vectors) > 0
+	a.mu.RUnlock()
+	
+	// Update dimension dynamically if query has different dimension (for first-time detection)
 	if len(query) != a.dimension {
-		return nil, fmt.Errorf("%w: expected %d, got %d", ErrVectorDimensionMismatch, a.dimension, len(query))
+		// If we have existing vectors, check their dimension
+		if hasVectors {
+			a.mu.RLock()
+			// Get dimension from first stored vector that matches filters
+			var storedDimension int
+			for _, iv := range a.vectors {
+				if len(iv.vector) > 0 && matchesFilters(iv.entry, filters) {
+					storedDimension = len(iv.vector)
+					break
+				}
+			}
+			a.mu.RUnlock()
+			
+			if storedDimension > 0 {
+				if len(query) == storedDimension {
+					// Update dimension to match
+					a.mu.Lock()
+					a.dimension = len(query)
+					a.mu.Unlock()
+				} else {
+					// Dimension mismatch - cannot compare vectors of different dimensions
+					// Return empty results instead of error (better UX - allows fallback to keyword search)
+					return []VectorResult{}, nil
+				}
+			} else {
+				// No vectors match the filters, update dimension for future inserts
+				a.mu.Lock()
+				a.dimension = len(query)
+				a.mu.Unlock()
+			}
+		} else {
+			// No vectors stored yet, just update dimension to match query
+			a.mu.Lock()
+			a.dimension = len(query)
+			a.mu.Unlock()
+		}
 	}
 	
 	a.mu.RLock()
@@ -115,6 +155,10 @@ func (a *FAISSAdapter) Search(ctx context.Context, query []float32, k int, filte
 	
 	for id, iv := range a.vectors {
 		if !matchesFilters(iv.entry, filters) {
+			continue
+		}
+		// Skip vectors with dimension mismatch
+		if len(iv.vector) != len(query) {
 			continue
 		}
 		candidates = append(candidates, struct {
@@ -173,10 +217,45 @@ func (a *FAISSAdapter) Insert(ctx context.Context, vectors []VectorEntry) error 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	
+	// If no vectors stored yet and we have vectors to insert, detect dimension from first vector
+	if len(a.vectors) == 0 && len(vectors) > 0 {
+		// Find first vector with non-zero length
+		for _, v := range vectors {
+			if len(v.Vector) > 0 {
+				a.dimension = len(v.Vector)
+				break
+			}
+		}
+	}
+	
 	for _, v := range vectors {
+		if len(v.Vector) == 0 {
+			continue // Skip empty vectors
+		}
+		
+		// Dynamically adapt dimension if needed (similar to Search method)
+		// This handles the case where vectors are loaded from database with different dimension
 		if len(v.Vector) != a.dimension {
-			return fmt.Errorf("%w: expected %d, got %d for id %s", 
-				ErrVectorDimensionMismatch, a.dimension, len(v.Vector), v.ID)
+			if len(a.vectors) == 0 {
+				// No vectors stored yet, update dimension to match this vector
+				a.dimension = len(v.Vector)
+			} else {
+				// Check if all existing vectors have the same dimension as this one
+				var existingDim int
+				for _, iv := range a.vectors {
+					if len(iv.vector) > 0 {
+						existingDim = len(iv.vector)
+						break
+					}
+				}
+				if len(v.Vector) == existingDim {
+					// Update dimension to match existing vectors
+					a.dimension = len(v.Vector)
+				} else {
+					return fmt.Errorf("%w: expected %d, got %d for id %s (existing vectors have dimension %d)", 
+						ErrVectorDimensionMismatch, a.dimension, len(v.Vector), v.ID, existingDim)
+				}
+			}
 		}
 		
 		// Normalize vector for cosine similarity

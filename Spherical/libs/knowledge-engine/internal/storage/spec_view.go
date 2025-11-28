@@ -214,7 +214,9 @@ func (r *SpecViewRepository) SearchByKeyword(ctx context.Context, tenantID uuid.
 			sv.market, sv.product_name
 		FROM spec_view_latest sv
 		WHERE sv.tenant_id = $1 
-			AND (sv.spec_name ILIKE '%' || $2 || '%' OR sv.value ILIKE '%' || $2 || '%')
+			AND (UPPER(sv.spec_name) LIKE '%' || UPPER($2) || '%' 
+			     OR UPPER(sv.value) LIKE '%' || UPPER($2) || '%'
+			     OR UPPER(sv.category_name) LIKE '%' || UPPER($2) || '%')
 		ORDER BY sv.confidence DESC, sv.spec_name
 		LIMIT $3
 	`

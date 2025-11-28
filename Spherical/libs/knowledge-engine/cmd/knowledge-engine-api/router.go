@@ -53,11 +53,13 @@ func NewRouter(logger *observability.Logger, cfg *AppConfig) http.Handler {
 	}
 
 	// Initialize services
-	router := retrieval.NewRouter(logger, memCache, vectorAdapter, retrieval.RouterConfig{
+	// TODO: Create specViewRepo from database connection when available
+	router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
 		MaxChunks:                 cfg.MaxChunks,
 		StructuredFirst:           true,
 		SemanticFallback:          true,
 		IntentConfidenceThreshold: 0.7,
+		KeywordConfidenceThreshold: 0.8,
 		CacheResults:              true,
 		CacheTTL:                  cfg.CacheTTL,
 	})

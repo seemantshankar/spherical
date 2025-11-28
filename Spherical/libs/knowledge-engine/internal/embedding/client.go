@@ -151,6 +151,10 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	for _, data := range embResp.Data {
 		if data.Index < len(embeddings) {
 			embeddings[data.Index] = data.Embedding
+			// Update dimension from actual API response
+			if len(data.Embedding) > 0 && c.dimension != len(data.Embedding) {
+				c.dimension = len(data.Embedding)
+			}
 		}
 	}
 

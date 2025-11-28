@@ -418,7 +418,7 @@ Results include citations and lineage information.`,
 				return fmt.Errorf("create vector adapter: %w", err)
 			}
 
-			router := retrieval.NewRouter(logger, memCache, vectorAdapter, retrieval.RouterConfig{
+			router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
 				MaxChunks:                 maxChunks,
 				StructuredFirst:           true,
 				SemanticFallback:          true,

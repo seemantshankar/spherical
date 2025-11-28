@@ -57,11 +57,13 @@ func TestRetrievalRouter_HybridQuery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create router
-	router := retrieval.NewRouter(logger, memCache, vectorAdapter, retrieval.RouterConfig{
+	// TODO: Create specViewRepo from test database when available
+	router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
 		MaxChunks:                 8,
 		StructuredFirst:           true,
 		SemanticFallback:          true,
 		IntentConfidenceThreshold: 0.7,
+		KeywordConfidenceThreshold: 0.8,
 		CacheResults:              true,
 		CacheTTL:                  5 * time.Minute,
 	})
@@ -85,8 +87,9 @@ func TestRetrievalRouter_IntentClassification(t *testing.T) {
 	memCache := cache.NewMemoryClient(100)
 	vectorAdapter, _ := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{Dimension: 768})
 
-	router := retrieval.NewRouter(logger, memCache, vectorAdapter, retrieval.RouterConfig{
+	router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
 		IntentConfidenceThreshold: 0.5,
+		KeywordConfidenceThreshold: 0.8,
 	})
 
 	tests := []struct {
@@ -149,7 +152,7 @@ func TestRetrievalRouter_TenantIsolation(t *testing.T) {
 	err := vectorAdapter.Insert(context.Background(), chunks)
 	require.NoError(t, err)
 
-	router := retrieval.NewRouter(logger, memCache, vectorAdapter, retrieval.RouterConfig{
+	router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
 		SemanticFallback: true,
 	})
 
@@ -182,7 +185,7 @@ func TestRetrievalRouter_Caching(t *testing.T) {
 	memCache := cache.NewMemoryClient(100)
 	vectorAdapter, _ := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{Dimension: 768})
 
-	router := retrieval.NewRouter(logger, memCache, vectorAdapter, retrieval.RouterConfig{
+	router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
 		CacheResults: true,
 		CacheTTL:     1 * time.Minute,
 	})

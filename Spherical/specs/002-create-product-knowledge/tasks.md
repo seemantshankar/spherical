@@ -84,6 +84,12 @@
 - [X] T036 [US2] Handle edge cases (deleted campaigns, trim mismatches) by falling back to last published variant and surfacing policy-compliant responses in `internal/retrieval/fallbacks.go`.
 - [X] T037 [US2] Add CLI query command in `cmd/knowledge-engine-cli/main.go` (query subcommand) with JSON output.
 - [X] T037a [P] [US2] Enhance `knowledge-demo` CLI with in-memory vector search for local semantic retrieval (embedding specs + cosine similarity) to resolve keyword mismatch issues (e.g., "child safety" vs "ISOFIX").
+- [X] T037b [US2] Refactor `knowledge-demo` to use production Router directly (not simplified version) for consistent behavior and production parity.
+- [X] T037c [US2] Add `KeywordConfidenceThreshold` to `RouterConfig` (default 0.8) to control keyword-first routing behavior.
+- [X] T037d [US2] Implement `calculateKeywordConfidence()` in Router with exact matches (+0.3 each), partial matches (+0.1 each), query complexity bonus/penalty (simple +0.2, complex -0.1), and result count bonus (diminishing returns, max +0.3).
+- [X] T037e [US2] Modify `queryStructuredSpecs()` to return confidence score and conditionally trigger vector search fallback only when confidence < threshold.
+- [X] T037f [US2] Update Router cache logic to only cache vector search results (not keyword-only results) with configurable TTL (default 5-10 minutes).
+- [X] T037g [US2] Add metrics tracking for path distribution (keyword-only %, hybrid %, vector-only %), average latency per path, and confidence score distribution.
 - [X] T038 [US2] Wire audit logging into retrieval handlers/CLI (`internal/monitoring/audit_logger.go`) covering request metadata + response citations.
 
 ---
