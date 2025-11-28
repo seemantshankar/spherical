@@ -1,0 +1,177 @@
+### Knowledge Engine Contract Tests - Comparisons
+### Base URL: http://localhost:8085/api/v1
+### Requires: Running knowledge-engine-api server with seeded comparison data
+
+@baseUrl = http://localhost:8085/api/v1
+@tenantId = 00000000-0000-0000-0000-000000000001
+@primaryProductId = 00000000-0000-0000-0000-000000000002
+@secondaryProductId = 00000000-0000-0000-0000-000000000004
+
+### ============================================================================
+### T039: Comparison Contract Tests
+### ============================================================================
+
+### TC-CMP-001: Query comparison - Happy Path
+### Expected: 200 OK with comparison rows
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}",
+  "max_rows": 20
+}
+
+### TC-CMP-002: Query with dimension filter
+### Expected: 200 OK with only specified dimensions
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}",
+  "dimensions": ["Fuel Efficiency", "Engine Power", "Safety Rating"],
+  "max_rows": 10
+}
+
+### TC-CMP-003: Query public benchmark comparison
+### Expected: 200 OK with benchmark data accessible
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "00000000-0000-0000-0000-000000000099",
+  "max_rows": 20
+}
+
+### TC-CMP-004: Query with narrative requested
+### Expected: 200 OK with narrative field populated
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}",
+  "include_narrative": true,
+  "max_rows": 10
+}
+
+### ============================================================================
+### Shareability Policy Tests
+### ============================================================================
+
+### TC-CMP-SHARE-001: Private comparison - tenant_only access
+### Expected: 200 OK for same tenant
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}",
+  "max_rows": 10
+}
+
+### TC-CMP-SHARE-002: Cross-tenant private comparison - Forbidden
+### Expected: 403 Forbidden or empty results
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: 00000000-0000-0000-0000-000000000099
+
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000099",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}",
+  "max_rows": 10
+}
+
+### TC-CMP-SHARE-003: Restricted competitor comparison - Denied
+### Expected: 403 Forbidden with policy violation message
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "00000000-0000-0000-0000-restricted001",
+  "max_rows": 10
+}
+
+### ============================================================================
+### Error Cases
+### ============================================================================
+
+### TC-CMP-ERR-001: Missing tenant - Unauthorized
+### Expected: 401 Unauthorized
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+
+{
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}"
+}
+
+### TC-CMP-ERR-002: Same product IDs - Bad Request
+### Expected: 400 Bad Request
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{primaryProductId}}"
+}
+
+### TC-CMP-ERR-003: Non-existent product - Not Found or Empty
+### Expected: 404 Not Found or 200 with empty comparisons
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "00000000-0000-0000-0000-nonexistent01"
+}
+
+### TC-CMP-ERR-004: Invalid UUID format - Bad Request
+### Expected: 400 Bad Request
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "not-a-uuid",
+  "secondary_product_id": "{{secondaryProductId}}"
+}
+
+### ============================================================================
+### Performance
+### ============================================================================
+
+### TC-CMP-PERF-001: Comparison latency within SLA (≤250ms p95)
+### Expected: 200 OK within latency budget
+POST {{baseUrl}}/comparisons/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "primary_product_id": "{{primaryProductId}}",
+  "secondary_product_id": "{{secondaryProductId}}",
+  "max_rows": 20
+}
+

@@ -1,0 +1,230 @@
+version: '3'
+
+vars:
+  MODULE: github.com/spherical-ai/spherical/libs/knowledge-engine
+  BIN_DIR: ./bin
+  COVERAGE_DIR: ./coverage
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # Build tasks
+  build:
+    desc: Build all binaries
+    deps: [build:cli, build:api]
+
+  build:cli:
+    desc: Build CLI binary
+    cmds:
+      - go build -o {{.BIN_DIR}}/knowledge-engine-cli ./cmd/knowledge-engine-cli
+    sources:
+      - ./cmd/knowledge-engine-cli/**/*.go
+      - ./internal/**/*.go
+      - ./pkg/**/*.go
+    generates:
+      - "{{.BIN_DIR}}/knowledge-engine-cli"
+
+  build:api:
+    desc: Build API server binary
+    cmds:
+      - go build -o {{.BIN_DIR}}/knowledge-engine-api ./cmd/knowledge-engine-api
+    sources:
+      - ./cmd/knowledge-engine-api/**/*.go
+      - ./internal/**/*.go
+      - ./pkg/**/*.go
+    generates:
+      - "{{.BIN_DIR}}/knowledge-engine-api"
+
+  # Test tasks
+  test:
+    desc: Run all tests
+    cmds:
+      - go test -race -coverprofile={{.COVERAGE_DIR}}/coverage.out ./...
+
+  test:unit:
+    desc: Run unit tests only
+    cmds:
+      - go test -race -short ./internal/... ./pkg/...
+
+  test:integration:
+    desc: Run integration tests (requires Docker)
+    env:
+      KNOWLEDGE_ENGINE_ENV: ci
+    cmds:
+      - go test -race -v ./tests/integration/...
+
+  test:contract:
+    desc: Run contract tests against running API
+    cmds:
+      - |
+        if command -v schemathesis &> /dev/null; then
+          schemathesis run ../../specs/002-create-product-knowledge/contracts/knowledge-engine.openapi.yaml --base-url=http://localhost:8085
+        else
+          echo "schemathesis not installed. Run: pip install schemathesis"
+        fi
+
+  test:coverage:
+    desc: Generate coverage report
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - go test -race -coverprofile={{.COVERAGE_DIR}}/coverage.out ./...
+      - go tool cover -html={{.COVERAGE_DIR}}/coverage.out -o {{.COVERAGE_DIR}}/coverage.html
+      - go tool cover -func={{.COVERAGE_DIR}}/coverage.out
+
+  # Code quality
+  lint:
+    desc: Run linters
+    cmds:
+      - golangci-lint run ./...
+
+  lint:fix:
+    desc: Run linters with auto-fix
+    cmds:
+      - golangci-lint run --fix ./...
+
+  fmt:
+    desc: Format code
+    cmds:
+      - go fmt ./...
+      - gofumpt -l -w .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  # Code generation
+  generate:
+    desc: Run all code generators
+    deps: [generate:sqlc, generate:proto, generate:graphql]
+
+  generate:sqlc:
+    desc: Generate sqlc code
+    cmds:
+      - sqlc generate
+    sources:
+      - ./db/migrations/*.sql
+      - ./sqlc.yaml
+
+  generate:proto:
+    desc: Generate protobuf/Connect code
+    cmds:
+      - buf generate
+    sources:
+      - ./api/proto/**/*.proto
+      - ./buf.gen.yaml
+
+  generate:graphql:
+    desc: Generate gqlgen code
+    cmds:
+      - go run github.com/99designs/gqlgen generate
+    sources:
+      - ./internal/api/graphql/schema.graphqls
+      - ./gqlgen.yml
+
+  # Database tasks
+  migrate:
+    desc: Run migrations (SQLite)
+    cmds:
+      - go run ./cmd/knowledge-engine-cli migrate --sqlite
+
+  migrate:postgres:
+    desc: Run migrations (Postgres)
+    cmds:
+      - go run ./cmd/knowledge-engine-cli migrate --postgres
+
+  migrate:new:
+    desc: Create new migration file
+    cmds:
+      - |
+        NAME=${NAME:-new_migration}
+        TIMESTAMP=$(date +%Y%m%d%H%M%S)
+        touch ./db/migrations/${TIMESTAMP}_${NAME}.sql
+        echo "Created ./db/migrations/${TIMESTAMP}_${NAME}.sql"
+
+  # Development
+  dev:
+    desc: Start API in development mode with hot reload
+    cmds:
+      - |
+        if command -v air &> /dev/null; then
+          air
+        else
+          go run ./cmd/knowledge-engine-api --config ./configs/dev.yaml
+        fi
+
+  dev:deps:
+    desc: Start development dependencies (Postgres, Redis, MinIO)
+    cmds:
+      - docker compose -f ../../ops/dev/knowledge-engine-compose.yml up -d
+
+  dev:deps:down:
+    desc: Stop development dependencies
+    cmds:
+      - docker compose -f ../../ops/dev/knowledge-engine-compose.yml down
+
+  dev:deps:clean:
+    desc: Stop and remove development dependency volumes
+    cmds:
+      - docker compose -f ../../ops/dev/knowledge-engine-compose.yml down -v
+
+  # CLI shortcuts
+  cli:
+    desc: Run CLI command (use -- to pass args)
+    cmds:
+      - go run ./cmd/knowledge-engine-cli {{.CLI_ARGS}}
+
+  ingest:
+    desc: Ingest a brochure (set MARKDOWN, TENANT, PRODUCT, CAMPAIGN)
+    cmds:
+      - |
+        go run ./cmd/knowledge-engine-cli ingest \
+          --tenant {{.TENANT | default "dev"}} \
+          --product {{.PRODUCT | default "test-product"}} \
+          --campaign {{.CAMPAIGN | default "test-campaign"}} \
+          --markdown {{.MARKDOWN | default "../../libs/pdf-extractor/camry-output-v3.md"}}
+
+  # Benchmarks
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - go test -bench=. -benchmem ./...
+
+  bench:ingestion:
+    desc: Run ingestion benchmark
+    cmds:
+      - go test -bench=BenchmarkIngestion -benchmem -benchtime=10s ./internal/ingest/...
+
+  bench:retrieval:
+    desc: Run retrieval benchmark
+    cmds:
+      - go test -bench=BenchmarkRetrieval -benchmem -benchtime=10s ./internal/retrieval/...
+
+  # Utilities
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf {{.BIN_DIR}}
+      - rm -rf {{.COVERAGE_DIR}}
+      - rm -f /tmp/knowledge-engine.db
+      - rm -f /tmp/knowledge-engine.faiss
+
+  deps:
+    desc: Download dependencies
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  tools:
+    desc: Install development tools
+    cmds:
+      - go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+      - go install github.com/99designs/gqlgen@latest
+      - go install github.com/bufbuild/buf/cmd/buf@latest
+      - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+      - go install mvdan.cc/gofumpt@latest
+      - go install github.com/air-verse/air@latest
+

@@ -115,8 +115,9 @@ Compliance analysts can trace any response back to the brochure page or upload e
 
 *Example of marking unclear requirements:*
 
-- **FR-016**: Admin CLI, SDK, and service-to-service calls MUST authenticate via OAuth2 client-credentials issued by the OEM IdP (Okta) with mandatory mTLS between services; the gateway MUST enforce RBAC roles (`admin`, `analyst`, `agent-runtime`) before requests reach the library.
-- **FR-017**: Historical campaign versions, lineage events, and drift alerts MUST be retained for 5 years (rolling) with per-tenant purge tooling that completes within 30 days of a deletion request to satisfy regional privacy regulations.
+- **FR-016**: Admin CLI, SDK, and service-to-service calls MUST authenticate via OAuth2 client-credentials issued by the OEM IdP (Okta) with mandatory mTLS between services; issuance includes tenant-scoped tokens (15-minute access TTL, one-time-use refresh tokens valid up to 90 days) and gateway-enforced RBAC roles (`admin`, `analyst`, `agent-runtime`) that carry the same scopes across REST, GraphQL, gRPC, and CLI surfaces so every entrypoint reuses the same credential rotation, telemetry, and revocation process.
+- **FR-017**: Historical campaign versions, lineage events, and drift alerts MUST be retained for 5 years (rolling) with per-tenant purge tooling that completes within 30 days of a deletion request to satisfy regional privacy regulations; purges emit audit events that confirm completion and compliance.
+- **FR-018**: CLI-first operations MUST reuse the multi-protocol auth stack (shared OAuth2/mTLS middleware, RBAC, audit hooks) so CLI commands, REST handlers, GraphQL resolvers, and gRPC services enforce identical retention, publish/rollback, and security policies without divergent behaviors.
 
 ### Key Entities *(include if feature involves data)*
 

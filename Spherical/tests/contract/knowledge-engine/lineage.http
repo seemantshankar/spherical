@@ -1,0 +1,129 @@
+### Knowledge Engine Contract Tests - Lineage & Drift
+### Base URL: http://localhost:8085/api/v1
+### Requires: Running knowledge-engine-api server with audit data
+
+@baseUrl = http://localhost:8085/api/v1
+@tenantId = 00000000-0000-0000-0000-000000000001
+@resourceId = 00000000-0000-0000-0000-000000000002
+
+### ============================================================================
+### T048: Lineage Contract Tests
+### ============================================================================
+
+### TC-LIN-001: Get lineage for spec value
+### Expected: 200 OK with lineage events
+GET {{baseUrl}}/lineage/spec_value/{{resourceId}}
+X-Tenant-ID: {{tenantId}}
+
+### TC-LIN-002: Get lineage for knowledge chunk
+### Expected: 200 OK with source document reference
+GET {{baseUrl}}/lineage/knowledge_chunk/{{resourceId}}
+X-Tenant-ID: {{tenantId}}
+
+### TC-LIN-003: Get lineage for campaign variant
+### Expected: 200 OK with publish/update history
+GET {{baseUrl}}/lineage/campaign_variant/{{resourceId}}
+X-Tenant-ID: {{tenantId}}
+
+### TC-LIN-004: Get lineage for feature block
+### Expected: 200 OK with creation/update events
+GET {{baseUrl}}/lineage/feature_block/{{resourceId}}
+X-Tenant-ID: {{tenantId}}
+
+### TC-LIN-005: Get lineage for product
+### Expected: 200 OK with product lifecycle events
+GET {{baseUrl}}/lineage/product/{{resourceId}}
+X-Tenant-ID: {{tenantId}}
+
+### ============================================================================
+### Drift Alerts
+### ============================================================================
+
+### TC-DRIFT-001: List open drift alerts
+### Expected: 200 OK with alerts array
+GET {{baseUrl}}/drift/alerts
+X-Tenant-ID: {{tenantId}}
+
+### TC-DRIFT-002: List drift alerts with status filter
+### Expected: 200 OK with filtered alerts
+GET {{baseUrl}}/drift/alerts?status=open
+X-Tenant-ID: {{tenantId}}
+
+### TC-DRIFT-003: List drift alerts with type filter
+### Expected: 200 OK with specific alert types
+GET {{baseUrl}}/drift/alerts?type=stale_campaign
+X-Tenant-ID: {{tenantId}}
+
+### TC-DRIFT-004: Trigger drift check
+### Expected: 200 OK with check results
+POST {{baseUrl}}/drift/check
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}"
+}
+
+### TC-DRIFT-005: Acknowledge drift alert
+### Expected: 200 OK
+POST {{baseUrl}}/drift/alerts/{{resourceId}}/acknowledge
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "acknowledged_by": "analyst@toyota.com"
+}
+
+### TC-DRIFT-006: Resolve drift alert
+### Expected: 200 OK
+POST {{baseUrl}}/drift/alerts/{{resourceId}}/resolve
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "resolved_by": "analyst@toyota.com",
+  "resolution": "Refreshed campaign data from updated brochure"
+}
+
+### ============================================================================
+### Error Cases
+### ============================================================================
+
+### TC-LIN-ERR-001: Get lineage without tenant - Unauthorized
+### Expected: 401 Unauthorized
+GET {{baseUrl}}/lineage/spec_value/{{resourceId}}
+
+### TC-LIN-ERR-002: Get lineage for invalid resource type - Bad Request
+### Expected: 400 Bad Request
+GET {{baseUrl}}/lineage/invalid_type/{{resourceId}}
+X-Tenant-ID: {{tenantId}}
+
+### TC-LIN-ERR-003: Get lineage for non-existent resource - Not Found
+### Expected: 404 Not Found or 200 with empty events
+GET {{baseUrl}}/lineage/spec_value/00000000-0000-0000-0000-nonexistent01
+X-Tenant-ID: {{tenantId}}
+
+### TC-LIN-ERR-004: Cross-tenant lineage access - Forbidden
+### Expected: 403 Forbidden or empty results
+GET {{baseUrl}}/lineage/spec_value/{{resourceId}}
+X-Tenant-ID: 00000000-0000-0000-0000-000000000099
+
+### ============================================================================
+### Audit Trail Validation
+### ============================================================================
+
+### TC-AUDIT-001: Verify ingestion event logged
+### Expected: Events include 'created' action for ingestion
+GET {{baseUrl}}/lineage/campaign_variant/{{resourceId}}?action=created
+X-Tenant-ID: {{tenantId}}
+
+### TC-AUDIT-002: Verify publish event logged
+### Expected: Events include 'updated' action for publish
+GET {{baseUrl}}/lineage/campaign_variant/{{resourceId}}?action=updated
+X-Tenant-ID: {{tenantId}}
+
+### TC-AUDIT-003: Verify delete event logged
+### Expected: Events include 'deleted' action
+GET {{baseUrl}}/lineage/spec_value/{{resourceId}}?action=deleted
+X-Tenant-ID: {{tenantId}}
+

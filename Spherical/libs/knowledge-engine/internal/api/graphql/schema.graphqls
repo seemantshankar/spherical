@@ -1,0 +1,333 @@
+# Knowledge Engine GraphQL Schema
+# Mirrors the REST API contracts for hybrid retrieval, ingestion, and governance
+
+scalar UUID
+scalar DateTime
+scalar JSON
+
+type Query {
+  """Retrieve structured and semantic context for a question."""
+  retrieveKnowledge(input: RetrievalInput!): RetrievalResponse!
+
+  """Query comparison rows between products."""
+  compareProducts(input: ComparisonInput!): ComparisonResponse!
+
+  """Get lineage events for a resource."""
+  getLineage(input: LineageInput!): LineageResponse!
+
+  """List drift alerts for a tenant."""
+  listDriftAlerts(tenantId: String!, status: AlertStatus): [DriftAlert!]!
+
+  """Get campaign variant details."""
+  getCampaign(tenantId: String!, campaignId: String!): CampaignVariant
+
+  """List products for a tenant."""
+  listProducts(tenantId: String!, limit: Int, offset: Int): ProductConnection!
+}
+
+type Mutation {
+  """Trigger brochure ingestion for a campaign."""
+  ingestCampaign(input: IngestionInput!): IngestionJob!
+
+  """Publish a campaign draft."""
+  publishCampaign(input: PublishInput!): CampaignVersion!
+
+  """Rollback to a previous campaign version."""
+  rollbackCampaign(input: RollbackInput!): CampaignVersion!
+
+  """Acknowledge a drift alert."""
+  acknowledgeDriftAlert(alertId: UUID!): DriftAlert!
+
+  """Resolve a drift alert."""
+  resolveDriftAlert(alertId: UUID!, resolution: String): DriftAlert!
+}
+
+type Subscription {
+  """Subscribe to drift alerts for a tenant."""
+  driftAlerts(tenantId: String!): DriftAlert!
+
+  """Subscribe to ingestion job updates."""
+  ingestionJobUpdates(jobId: UUID!): IngestionJob!
+}
+
+# Input Types
+
+input RetrievalInput {
+  tenantId: String!
+  productIds: [String!]
+  campaignVariantId: String
+  question: String!
+  intentHint: IntentType
+  conversationContext: [ConversationMessage!]
+  filters: RetrievalFilters
+  maxChunks: Int
+  includeLineage: Boolean
+}
+
+input RetrievalFilters {
+  categories: [String!]
+  chunkTypes: [ChunkType!]
+}
+
+input ConversationMessage {
+  role: String!
+  content: String!
+}
+
+input ComparisonInput {
+  tenantId: String!
+  primaryProductId: String!
+  secondaryProductId: String!
+  dimensions: [String!]
+  maxRows: Int
+}
+
+input LineageInput {
+  tenantId: String!
+  resourceType: ResourceType!
+  resourceId: UUID!
+}
+
+input IngestionInput {
+  tenantId: String!
+  productId: String!
+  campaignId: String!
+  documentSource: DocumentSourceInput!
+  markdownUrl: String!
+  overwriteDraft: Boolean
+  autoPublish: Boolean
+  operator: String!
+  metadata: JSON
+}
+
+input DocumentSourceInput {
+  id: UUID!
+  sha256: String!
+}
+
+input PublishInput {
+  tenantId: String!
+  campaignId: String!
+  version: Int!
+  approvedBy: String!
+  releaseNotes: String
+}
+
+input RollbackInput {
+  tenantId: String!
+  campaignId: String!
+  targetVersion: Int!
+  reason: String!
+}
+
+# Response Types
+
+type RetrievalResponse {
+  intent: IntentType!
+  latencyMs: Int!
+  structuredFacts: [SpecFact!]!
+  semanticChunks: [SemanticChunk!]!
+  comparisons: [ComparisonRow!]!
+  lineage: [LineageEvent!]!
+}
+
+type SpecFact {
+  specItemId: UUID!
+  category: String!
+  name: String!
+  value: String!
+  unit: String
+  confidence: Float!
+  campaignVariantId: String!
+  source: SourceRef!
+}
+
+type SemanticChunk {
+  chunkId: UUID!
+  chunkType: ChunkType!
+  text: String!
+  distance: Float!
+  metadata: JSON
+  source: SourceRef!
+}
+
+type SourceRef {
+  documentSourceId: UUID
+  page: Int
+  url: String
+}
+
+type ComparisonResponse {
+  comparisons: [ComparisonRow!]!
+}
+
+type ComparisonRow {
+  dimension: String!
+  primaryProductId: String!
+  secondaryProductId: String!
+  primaryValue: String
+  secondaryValue: String
+  verdict: Verdict!
+  narrative: String
+  shareability: Shareability!
+  source: ComparisonSource!
+}
+
+type ComparisonSource {
+  primarySpecId: UUID
+  secondarySpecId: UUID
+}
+
+type LineageResponse {
+  resourceId: UUID!
+  events: [LineageEvent!]!
+}
+
+type LineageEvent {
+  id: UUID!
+  resourceType: String!
+  resourceId: UUID!
+  action: LineageAction!
+  operator: String
+  occurredAt: DateTime!
+  documentSourceId: UUID
+  ingestionJobId: UUID
+  diff: JSON
+}
+
+type IngestionJob {
+  id: UUID!
+  status: JobStatus!
+  startedAt: DateTime
+  etaSeconds: Int
+  conflictingSpecIds: [UUID!]
+  error: String
+}
+
+type CampaignVersion {
+  campaignId: String!
+  version: Int!
+  status: CampaignStatus!
+  effectiveFrom: DateTime
+  effectiveThrough: DateTime
+  publishedBy: String
+}
+
+type CampaignVariant {
+  id: UUID!
+  productId: UUID!
+  tenantId: UUID!
+  locale: String!
+  trim: String
+  market: String
+  status: CampaignStatus!
+  version: Int!
+  effectiveFrom: DateTime
+  effectiveThrough: DateTime
+  isDraft: Boolean!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type DriftAlert {
+  id: UUID!
+  tenantId: UUID!
+  productId: UUID
+  campaignVariantId: UUID
+  alertType: AlertType!
+  details: JSON
+  status: AlertStatus!
+  detectedAt: DateTime!
+  resolvedAt: DateTime
+}
+
+type Product {
+  id: UUID!
+  tenantId: UUID!
+  name: String!
+  segment: String
+  bodyType: String
+  modelYear: Int
+  isPublicBenchmark: Boolean!
+  metadata: JSON
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type ProductConnection {
+  nodes: [Product!]!
+  totalCount: Int!
+  hasNextPage: Boolean!
+}
+
+# Enums
+
+enum IntentType {
+  SPEC_LOOKUP
+  USP_LOOKUP
+  COMPARISON
+  FAQ
+  UNKNOWN
+}
+
+enum ChunkType {
+  SPEC_ROW
+  FEATURE_BLOCK
+  USP
+  FAQ
+  COMPARISON
+  GLOBAL
+}
+
+enum ResourceType {
+  SPEC_VALUE
+  FEATURE_BLOCK
+  KNOWLEDGE_CHUNK
+  COMPARISON
+}
+
+enum Verdict {
+  PRIMARY_BETTER
+  SECONDARY_BETTER
+  EQUAL
+  CANNOT_COMPARE
+}
+
+enum Shareability {
+  PRIVATE
+  TENANT
+  PUBLIC
+}
+
+enum CampaignStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  FAILED
+  SUCCEEDED
+}
+
+enum LineageAction {
+  CREATED
+  UPDATED
+  DELETED
+  RECONCILED
+}
+
+enum AlertType {
+  STALE_CAMPAIGN
+  CONFLICT_DETECTED
+  HASH_CHANGED
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+

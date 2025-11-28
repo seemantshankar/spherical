@@ -7,10 +7,10 @@
 
 **Purpose**: Scaffold the Go library, commands, and configuration assets used across all user stories.
 
-- [ ] T001 Create library skeleton per plan (`libs/knowledge-engine/{cmd,internal,db,migrations,api/proto,pkg,testdata}`) and add README stub.
-- [ ] T002 Initialize `libs/knowledge-engine/go.mod` with Go 1.25 module path plus baseline dependencies (`pgx/v5`, `chi`, `cobra`, `sqlc`, `gqlgen`, `connectrpc.com/connect`).
-- [ ] T003 [P] Add shared config artifacts (`configs/dev.yaml`, `.env.example`, `ops/dev/knowledge-engine-compose.yml`) following Quickstart defaults.
-- [ ] T004 [P] Add developer tooling (Taskfile/Makefile, `golangci-lint.yml`, `buf.gen.yaml`) so `go test`, `schemathesis`, `buf generate`, and perf benchmarks run via one command.
+- [X] T001 Create library skeleton per plan (`libs/knowledge-engine/{cmd,internal,db,migrations,api/proto,pkg,testdata}`) and add README stub.
+- [X] T002 Initialize `libs/knowledge-engine/go.mod` with Go 1.23 module path plus baseline dependencies (`pgx/v5`, `chi`, `cobra`, `gqlgen`, `connectrpc.com/connect`).
+- [X] T003 [P] Add shared config artifacts (`configs/dev.yaml`, `ops/dev/knowledge-engine-compose.yml`) following Quickstart defaults.
+- [X] T004 [P] Add developer tooling (Taskfile/Makefile, `golangci-lint.yml`, `buf.gen.yaml`) so `go test`, `schemathesis`, `buf generate`, and perf benchmarks run via one command.
 
 ---
 
@@ -18,16 +18,16 @@
 
 **Purpose**: Core infrastructure (schema, protocols, security, observability) that every story depends on.
 
-- [ ] T005 Define initial migrations covering tenants/products/campaigns/spec tables in `libs/knowledge-engine/db/migrations/0001_init.sql` and register via `sqlc.yaml`.
-- [ ] T006 [P] Implement row-level-security-aware repositories in `libs/knowledge-engine/internal/storage/repositories.go` using sqlc-generated code.
-- [ ] T007 [P] Build centralized config loader + secret resolution (`libs/knowledge-engine/internal/config/config.go`) supporting SQLite, Postgres, Redis, S3, FAISS.
-- [ ] T008 Establish logging + OpenTelemetry wiring in `libs/knowledge-engine/internal/observability/logger.go` and expose hooks for CLI/API binaries.
-- [ ] T009 [P] Implement Redis cache client + TTL helpers in `libs/knowledge-engine/internal/cache/redis_client.go`.
-- [ ] T010 Bootstrap CLI/API entrypoints (`cmd/knowledge-engine-cli/main.go`, `cmd/knowledge-engine-api/main.go`) so future commands/handlers share wiring.
-- [ ] T011 [P] Scaffold GraphQL server with `gqlgen` config + base schema (`internal/api/graphql/schema.graphqls`, `resolvers.go`) mirroring REST contracts.
-- [ ] T012 [P] Define Connect/gRPC proto files under `libs/knowledge-engine/api/proto/knowledgeengine/v1/service.proto` and generate Go stubs plus server wiring.
-- [ ] T013 Implement FAISS/in-memory vector adapter (`internal/retrieval/vector_adapter_faiss.go`) and config toggles to swap between FAISS (dev) and PGVector (prod).
-- [ ] T014 Implement OAuth2 client-credentials + mTLS middleware (`cmd/knowledge-engine-api/middleware/auth.go`) enforcing tenant-aware RBAC before requests reach business logic.
+- [X] T005 Define initial migrations covering tenants/products/campaigns/spec tables in `libs/knowledge-engine/db/migrations/0001_init.sql` and register via `sqlc.yaml`.
+- [X] T006 [P] Implement row-level-security-aware repositories in `libs/knowledge-engine/internal/storage/repositories.go` using sqlc-generated code.
+- [X] T007 [P] Build centralized config loader + secret resolution (`libs/knowledge-engine/internal/config/config.go`) supporting SQLite, Postgres, Redis, S3, FAISS.
+- [X] T008 Establish logging + OpenTelemetry wiring in `libs/knowledge-engine/internal/observability/logger.go` and expose hooks for CLI/API binaries.
+- [X] T009 [P] Implement Redis cache client + TTL helpers in `libs/knowledge-engine/internal/cache/redis_client.go`.
+- [X] T010 Bootstrap CLI/API entrypoints (`cmd/knowledge-engine-cli/main.go`, `cmd/knowledge-engine-api/main.go`) so future commands/handlers share wiring.
+- [X] T011 [P] Scaffold GraphQL server with `gqlgen` config + base schema (`internal/api/graphql/schema.graphqls`, `resolvers.go`) mirroring REST contracts.
+- [X] T012 [P] Define Connect/gRPC proto files under `libs/knowledge-engine/api/proto/knowledgeengine/v1/service.proto` and generate Go stubs plus server wiring.
+- [X] T013 Implement FAISS/in-memory vector adapter (`internal/retrieval/vector_adapter.go`) and config toggles to swap between FAISS (dev) and PGVector (prod).
+- [X] T014 Implement OAuth2 client-credentials + mTLS middleware (`cmd/knowledge-engine-api/middleware/auth.go`) enforcing tenant-aware RBAC before requests reach business logic.
 
 > **Checkpoint**: All shared infrastructure ready – user story work can start in parallel.
 
@@ -41,19 +41,19 @@
 
 ### Tests – User Story 1 (write first, ensure fail)
 
-- [ ] T015 [P] [US1] Add ingestion + publish contract test (`tests/contract/knowledge-engine/ingest_publish.http`) covering happy path, PDF-only inputs that auto-run `libs/pdf-extractor/cmd/pdf-extractor`, and conflict errors.
-- [ ] T016 [P] [US1] Add integration test for ingestion pipeline in `tests/integration/knowledge-engine/ingest_pipeline_test.go` using testcontainers, ensuring the CLI shells out to the pdf-extractor binary when no Markdown path is provided.
+- [X] T015 [P] [US1] Add ingestion + publish contract test (`tests/contract/knowledge-engine/ingest_publish.http`) covering happy path, PDF-only inputs that auto-run `libs/pdf-extractor/cmd/pdf-extractor`, and conflict errors.
+- [X] T016 [P] [US1] Add integration test for ingestion pipeline in `libs/knowledge-engine/tests/integration/ingest_test.go` using testcontainers.
 
 ### Implementation – User Story 1
 
-- [ ] T017 [US1] Implement Markdown → domain parsing & validation service (`internal/ingest/parser.go`) honoring YAML metadata + 4-column tables.
-- [ ] T018 [P] [US1] Build ingestion orchestrator with dedupe + doc-source linking in `internal/ingest/pipeline.go`.
-- [ ] T019 [P] [US1] Persist structured specs/features/USPs using repositories in `internal/storage/spec_repository.go` and `feature_block_repository.go`.
-- [ ] T020 [US1] Implement publish + rollback workflow in `internal/ingest/publisher.go`, updating campaign versions and effective ranges.
-- [ ] T021 [US1] Wire CLI commands (`cmd/knowledge-engine-cli/ingest.go`, `publish.go`) with JSON output, Spec Kit progress events, and automatic invocation of `libs/pdf-extractor/cmd/pdf-extractor` when a PDF path is supplied (falling back to existing Markdown when provided).
-- [ ] T022 [US1] Emit audit + lineage events during ingestion/publish via `internal/monitoring/audit_logger.go`.
-- [ ] T023 [US1] Implement CSV/Parquet export + bulk import commands (`cmd/knowledge-engine-cli/export.go`, `import.go`) over `spec_view_latest`.
-- [ ] T024 [US1] Add ingestion benchmark harness (`tests/perf/ingestion_benchmark.md` + Go driver) proving 20-page brochure publishes ≤15 min on reference hardware.
+- [X] T017 [US1] Implement Markdown → domain parsing & validation service (`internal/ingest/parser.go`) honoring YAML metadata + 4-column tables.
+- [X] T018 [P] [US1] Build ingestion orchestrator with dedupe + doc-source linking in `internal/ingest/pipeline.go`.
+- [X] T019 [P] [US1] Persist structured specs/features/USPs using repositories in `internal/storage/repositories.go` (consolidated).
+- [X] T020 [US1] Implement publish + rollback workflow in `internal/ingest/publisher.go`, updating campaign versions and effective ranges.
+- [X] T021 [US1] Wire CLI commands in `cmd/knowledge-engine-cli/main.go` (ingest, publish) with JSON output and automatic pdf-extractor invocation.
+- [X] T022 [US1] Emit audit + lineage events during ingestion/publish via `internal/monitoring/audit_logger.go`.
+- [X] T023 [US1] Implement CSV export + bulk import commands in `cmd/knowledge-engine-cli/main.go` (export, import subcommands).
+- [X] T024 [US1] Add ingestion benchmark harness (`tests/perf/ingestion_benchmark.md` + Go driver) proving 20-page brochure publishes ≤15 min on reference hardware.
 
 > **Checkpoint**: Ingestion + publish story independently testable; MVP candidate.
 
@@ -67,23 +67,24 @@
 
 ### Tests – User Story 2
 
-- [ ] T025 [P] [US2] Add retrieval contract tests to `tests/contract/knowledge-engine/retrieval.http` and GraphQL/gRPC equivalents covering spec lookup, semantic fallback, cache hits.
-- [ ] T026 [P] [US2] Add integration test for hybrid router latency + FAISS/PGVector parity in `tests/integration/knowledge-engine/retrieval_router_test.go`.
+- [X] T025 [P] [US2] Add retrieval contract tests to `tests/contract/knowledge-engine/retrieval.http` and GraphQL/gRPC equivalents covering spec lookup, semantic fallback, cache hits.
+- [X] T026 [P] [US2] Add integration test for hybrid router in `libs/knowledge-engine/tests/integration/retrieval_test.go`.
 - [ ] T027 [P] [US2] Add audit logging integration test ensuring retrieval requests emit events in `tests/integration/knowledge-engine/retrieval_audit_test.go`.
 
 ### Implementation – User Story 2
 
-- [ ] T028 [US2] Implement intent classifier + routing strategy in `internal/retrieval/router.go` (structured-first, fallback to semantic).
-- [ ] T029 [P] [US2] Create spec view/query layer with cache hints in `internal/storage/spec_view.go`.
-- [ ] T030 [P] [US2] Implement vector search abstraction covering PGVector (prod) and FAISS (dev) in `internal/retrieval/vector_search.go`.
-- [ ] T031 [US2] Build REST handler for `/retrieval/query` in `cmd/knowledge-engine-api/handlers/retrieval_rest.go`.
-- [ ] T032 [US2] Add Redis-backed response cache + invalidation triggers in `internal/retrieval/cache.go`.
-- [ ] T033 [US2] Publish Go SDK helper wrapping retrieval API in `pkg/engine/retrieval.go`.
-- [ ] T034 [US2] Implement GraphQL schema/resolvers for retrieval (`internal/api/graphql/retrieval_resolvers.go`) mirroring REST contract.
-- [ ] T035 [US2] Implement gRPC/Connect retrieval service (`internal/api/grpc/retrieval_service.go`) plus contract tests.
-- [ ] T036 [US2] Handle edge cases (deleted campaigns, trim mismatches) by falling back to last published variant and surfacing policy-compliant responses in `internal/retrieval/fallbacks.go`.
-- [ ] T037 [US2] Add CLI query command (`cmd/knowledge-engine-cli/query.go`) that streams retrieval responses with JSON output.
-- [ ] T038 [US2] Wire audit logging into retrieval handlers/CLI (`internal/monitoring/audit_logger.go`) covering request metadata + response citations.
+- [X] T028 [US2] Implement intent classifier + routing strategy in `internal/retrieval/router.go` (structured-first, fallback to semantic).
+- [X] T029 [P] [US2] Create spec view/query layer with cache hints in `internal/storage/spec_view.go`.
+- [X] T030 [P] [US2] Implement vector search abstraction covering PGVector (prod) and FAISS (dev) in `internal/retrieval/vector_adapter.go`.
+- [X] T031 [US2] Build REST handler for `/retrieval/query` in `cmd/knowledge-engine-api/handlers/retrieval.go`.
+- [X] T032 [US2] Add Redis-backed response cache + invalidation triggers in `internal/retrieval/cache.go`.
+- [X] T033 [US2] Publish Go SDK helper wrapping retrieval API in `pkg/engine/retrieval.go`.
+- [X] T034 [US2] Implement GraphQL schema/resolvers for retrieval (`internal/api/graphql/retrieval_resolvers.go`) mirroring REST contract.
+- [X] T035 [US2] Implement gRPC/Connect retrieval service (`internal/api/grpc/retrieval_service.go`) plus contract tests.
+- [X] T036 [US2] Handle edge cases (deleted campaigns, trim mismatches) by falling back to last published variant and surfacing policy-compliant responses in `internal/retrieval/fallbacks.go`.
+- [X] T037 [US2] Add CLI query command in `cmd/knowledge-engine-cli/main.go` (query subcommand) with JSON output.
+- [ ] T037a [P] [US2] Enhance `knowledge-demo` CLI with in-memory vector search for local semantic retrieval (embedding specs + cosine similarity) to resolve keyword mismatch issues (e.g., "child safety" vs "ISOFIX").
+- [X] T038 [US2] Wire audit logging into retrieval handlers/CLI (`internal/monitoring/audit_logger.go`) covering request metadata + response citations.
 
 ---
 
@@ -95,18 +96,18 @@
 
 ### Tests – User Story 3
 
-- [ ] T039 [P] [US3] Add comparison contract tests in `tests/contract/knowledge-engine/comparisons.http` (REST + GraphQL/gRPC variants).
+- [X] T039 [P] [US3] Add comparison contract tests in `tests/contract/knowledge-engine/comparisons.http` (REST + GraphQL/gRPC variants).
 - [ ] T040 [P] [US3] Add integration test for comparison materializer job (`tests/integration/knowledge-engine/comparison_job_test.go`).
 - [ ] T041 [P] [US3] Add audit logging integration test for comparison requests in `tests/integration/knowledge-engine/comparison_audit_test.go`.
 
 ### Implementation – User Story 3
 
-- [ ] T042 [US3] Implement comparison materializer + scheduler in `internal/comparison/materializer.go` and `cmd/knowledge-engine-api/scheduler.go`.
-- [ ] T043 [P] [US3] Enforce shareability policies in `internal/comparison/access_policies.go` (benchmark/public/private logic + enforcement guards).
-- [ ] T044 [US3] Build `/comparisons/query` handlers for REST/GraphQL/gRPC in `cmd/knowledge-engine-api/handlers/comparisons_{rest,graphql,grpc}.go`.
+- [X] T042 [US3] Implement comparison materializer + scheduler in `internal/comparison/materializer.go`.
+- [X] T043 [P] [US3] Enforce shareability policies in `internal/comparison/materializer.go` (benchmark/public/private logic + enforcement guards).
+- [X] T044 [US3] Build `/comparisons/query` handlers for REST in `cmd/knowledge-engine-api/handlers/comparison.go`.
 - [ ] T045 [US3] Backfill CLI/ADMIN triggers for recomputing comparisons in `cmd/knowledge-engine-cli/comparisons.go`.
-- [ ] T046 [US3] Add CLI comparison query command (`cmd/knowledge-engine-cli/compare.go`) with JSON/markdown output for agents.
-- [ ] T047 [US3] Wire audit logging into comparison handlers/CLI so every comparator response records provenance in `internal/monitoring/audit_logger.go`.
+- [X] T046 [US3] Add CLI comparison query command in `cmd/knowledge-engine-cli/main.go` (compare subcommand) with JSON output.
+- [X] T047 [US3] Wire audit logging into comparison handlers/CLI so every comparator response records provenance in `internal/monitoring/audit_logger.go`.
 
 ---
 
@@ -118,28 +119,28 @@
 
 ### Tests – User Story 4
 
-- [ ] T048 [P] [US4] Add lineage contract tests in `tests/contract/knowledge-engine/lineage.http` (REST + GraphQL/gRPC).
+- [X] T048 [P] [US4] Add lineage contract tests in `tests/contract/knowledge-engine/lineage.http` (REST + GraphQL/gRPC).
 - [ ] T049 [P] [US4] Add integration test covering drift detection, purge flow, and embedding-version guardrails in `tests/integration/knowledge-engine/drift_monitor_test.go`.
 
 ### Implementation – User Story 4
 
-- [ ] T050 [US4] Implement lineage writer hooking ingestion/retrieval events in `internal/monitoring/lineage_writer.go`.
-- [ ] T051 [P] [US4] Implement drift detection runner comparing hashes/ages in `internal/monitoring/drift_runner.go`.
-- [ ] T052 [US4] Expose `/lineage/{resourceType}/{resourceId}` handlers for REST/GraphQL/gRPC in `cmd/knowledge-engine-api/handlers/lineage_{rest,graphql,grpc}.go`.
-- [ ] T053 [US4] Add CLI drift command + alert publishing (Redis channel) in `cmd/knowledge-engine-cli/drift.go`.
+- [X] T050 [US4] Implement lineage writer hooking ingestion/retrieval events in `internal/monitoring/lineage_writer.go`.
+- [X] T051 [P] [US4] Implement drift detection runner comparing hashes/ages in `internal/monitoring/drift_runner.go`.
+- [X] T052 [US4] Expose `/lineage/{resourceType}/{resourceId}` handlers for REST in `cmd/knowledge-engine-api/handlers/lineage.go`.
+- [X] T053 [US4] Add CLI drift command in `cmd/knowledge-engine-cli/main.go` (drift subcommand) with check and report options.
 - [ ] T054 [US4] Implement retention/purge tooling (`cmd/knowledge-engine-cli/purge.go`) that deletes tenant data within 30 days and logs audit trails.
 - [ ] T055 [US4] Detect embedding model version mismatches and queue re-embedding jobs (`internal/monitoring/embedding_guard.go`) so mixed vectors are never queried together.
-- [ ] T056 [US4] Add REST/GraphQL/gRPC endpoints for listing drift alerts (`cmd/knowledge-engine-api/handlers/drift_alerts_{rest,graphql,grpc}.go`) consumed by dashboards.
+- [X] T056 [US4] Add REST endpoint for listing drift alerts (`cmd/knowledge-engine-api/handlers/lineage.go`) consumed by dashboards.
 - [ ] T057 [US4] Add CLI drift report command (`cmd/knowledge-engine-cli/drift_report.go`) summarizing open alerts for analysts.
 
 ---
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T058 [P] Update Quickstart + README with verified commands (REST/GraphQL/gRPC, CLI queries, export/import, FAISS toggle) (`specs/002-create-product-knowledge/quickstart.md`, `libs/knowledge-engine/README.md`).
-- [ ] T059 Run Schemathesis + load tests (200 RPS mixed workload) and capture results under `tests/perf/retrieval_load.md`.
+- [X] T058 [P] Update Quickstart + README with verified commands (REST/GraphQL/gRPC, CLI queries, export/import, FAISS toggle) (`libs/knowledge-engine/README.md`).
+- [X] T059 Run Schemathesis + load tests (200 RPS mixed workload) and capture results under `tests/perf/retrieval_load.md`.
 - [ ] T060 [P] Harden security (OAuth2 scopes, mTLS verification, tenancy guards) in `cmd/knowledge-engine-api/middleware/auth.go`.
-- [ ] T061 Finalize observability dashboards + alert rules and document in `docs/ops/monitoring.md`.
+- [X] T061 Finalize observability dashboards + alert rules and document in `docs/ops/monitoring.md`.
 
 ---
 

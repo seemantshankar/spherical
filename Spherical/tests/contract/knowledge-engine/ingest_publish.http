@@ -1,0 +1,137 @@
+### Knowledge Engine Contract Tests - Ingestion & Publish
+### Base URL: http://localhost:8085/api/v1
+### Requires: Running knowledge-engine-api server
+
+@baseUrl = http://localhost:8085/api/v1
+@tenantId = 00000000-0000-0000-0000-000000000001
+@productId = 00000000-0000-0000-0000-000000000002
+@campaignId = 00000000-0000-0000-0000-000000000003
+
+### ============================================================================
+### T015: Ingestion + Publish Contract Tests
+### ============================================================================
+
+### TC-INGEST-001: Ingest Markdown brochure - Happy Path
+### Expected: 202 Accepted with job ID
+POST {{baseUrl}}/tenants/{{tenantId}}/products/{{productId}}/campaigns/{{campaignId}}/ingest
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "markdown_content": "---\ntitle: Toyota Camry 2025\nproduct_name: Camry\nmodel_year: 2025\nlocale: en-US\n---\n\n## Specifications\n\n| Category | Spec | Value | Unit |\n|----------|------|-------|------|\n| Engine | Horsepower | 203 | hp |\n| Engine | Torque | 184 | lb-ft |\n| Fuel | Combined MPG | 28 | mpg |\n\n## Features\n\n- **Safety Suite**: Advanced driver assistance with pre-collision system\n- **Infotainment**: 9-inch touchscreen with Apple CarPlay\n\n## USPs\n\n1. Best-in-class fuel efficiency\n2. Industry-leading safety ratings\n",
+  "source_file": "camry-2025-brochure.pdf",
+  "operator": "admin@toyota.com",
+  "overwrite": false
+}
+
+### TC-INGEST-002: Ingest with PDF path - triggers pdf-extractor
+### Expected: 202 Accepted, pdf-extractor invoked
+POST {{baseUrl}}/tenants/{{tenantId}}/products/{{productId}}/campaigns/{{campaignId}}/ingest
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "pdf_path": "/path/to/camry-brochure.pdf",
+  "operator": "admin@toyota.com"
+}
+
+### TC-INGEST-003: Ingest with missing tenant - Unauthorized
+### Expected: 401 Unauthorized
+POST {{baseUrl}}/tenants/{{tenantId}}/products/{{productId}}/campaigns/{{campaignId}}/ingest
+Content-Type: application/json
+
+{
+  "markdown_content": "# Test"
+}
+
+### TC-INGEST-004: Ingest with conflict status - returns conflict details
+### Expected: 409 Conflict with conflict_ids array
+POST {{baseUrl}}/tenants/{{tenantId}}/products/{{productId}}/campaigns/{{campaignId}}/ingest
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "markdown_content": "---\ntitle: Conflicting Data\n---\n\n| Category | Spec | Value | Unit |\n|----------|------|-------|------|\n| Engine | Horsepower | 250 | hp |\n",
+  "overwrite": false
+}
+
+### TC-INGEST-005: Ingest duplicate content - deduplicated
+### Expected: 200 OK with dedupe_skipped count
+POST {{baseUrl}}/tenants/{{tenantId}}/products/{{productId}}/campaigns/{{campaignId}}/ingest
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "markdown_content": "---\ntitle: Toyota Camry 2025\n---\n\n| Category | Spec | Value | Unit |\n|----------|------|-------|------|\n| Engine | Horsepower | 203 | hp |\n",
+  "dedupe_threshold": 0.95
+}
+
+### ============================================================================
+### Publish Contract Tests
+### ============================================================================
+
+### TC-PUBLISH-001: Publish campaign - Happy Path
+### Expected: 200 OK with new version number
+POST {{baseUrl}}/tenants/{{tenantId}}/campaigns/{{campaignId}}/publish
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "approved_by": "manager@toyota.com",
+  "release_notes": "Q1 2025 campaign launch"
+}
+
+### TC-PUBLISH-002: Publish with unresolved conflicts - Blocked
+### Expected: 409 Conflict with list of unresolved conflicts
+POST {{baseUrl}}/tenants/{{tenantId}}/campaigns/{{campaignId}}/publish
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "approved_by": "manager@toyota.com"
+}
+
+### TC-PUBLISH-003: Rollback to previous version
+### Expected: 200 OK with restored version
+POST {{baseUrl}}/tenants/{{tenantId}}/campaigns/{{campaignId}}/publish
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "rollback": true,
+  "target_version": 1,
+  "reason": "Data quality issues discovered"
+}
+
+### TC-PUBLISH-004: Publish non-existent campaign - Not Found
+### Expected: 404 Not Found
+POST {{baseUrl}}/tenants/{{tenantId}}/campaigns/00000000-0000-0000-0000-999999999999/publish
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "approved_by": "manager@toyota.com"
+}
+
+### TC-PUBLISH-005: Cross-tenant publish attempt - Forbidden
+### Expected: 403 Forbidden
+POST {{baseUrl}}/tenants/{{tenantId}}/campaigns/{{campaignId}}/publish
+Content-Type: application/json
+X-Tenant-ID: 00000000-0000-0000-0000-000000000099
+
+{
+  "approved_by": "attacker@evil.com"
+}
+
+### ============================================================================
+### Health Check
+### ============================================================================
+
+### TC-HEALTH-001: Service health check
+### Expected: 200 OK
+GET http://localhost:8085/health
+
+### TC-HEALTH-002: Readiness probe
+### Expected: 200 OK when database connected
+GET http://localhost:8085/ready
+

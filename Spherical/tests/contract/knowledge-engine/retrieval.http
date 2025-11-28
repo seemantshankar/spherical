@@ -1,0 +1,216 @@
+### Knowledge Engine Contract Tests - Retrieval
+### Base URL: http://localhost:8085/api/v1
+### Requires: Running knowledge-engine-api server with seeded data
+
+@baseUrl = http://localhost:8085/api/v1
+@tenantId = 00000000-0000-0000-0000-000000000001
+@productId = 00000000-0000-0000-0000-000000000002
+@campaignId = 00000000-0000-0000-0000-000000000003
+
+### ============================================================================
+### T025: Retrieval Contract Tests
+### ============================================================================
+
+### TC-RET-001: Spec lookup query - structured facts returned
+### Expected: 200 OK with intent=spec_lookup, structured_facts populated
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "What is the fuel efficiency of the Camry?",
+  "max_chunks": 6
+}
+
+### TC-RET-002: USP lookup query - semantic chunks returned
+### Expected: 200 OK with intent=usp_lookup, semantic_chunks populated
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "What makes the Camry unique compared to competitors?",
+  "max_chunks": 6
+}
+
+### TC-RET-003: Comparison query - triggers comparison flow
+### Expected: 200 OK with intent=comparison
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}", "00000000-0000-0000-0000-000000000004"],
+  "question": "How does Camry compare to Accord in fuel efficiency?",
+  "max_chunks": 6
+}
+
+### TC-RET-004: FAQ query - fallback to semantic
+### Expected: 200 OK with intent=faq, semantic_chunks
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "How do I connect my phone via Bluetooth?",
+  "max_chunks": 4
+}
+
+### TC-RET-005: Query with intent hint - bypasses classification
+### Expected: 200 OK with intent matching hint
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "Tell me about the engine",
+  "intent_hint": "spec_lookup",
+  "max_chunks": 6
+}
+
+### TC-RET-006: Query with category filter
+### Expected: 200 OK with facts filtered to category
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "What are the dimensions?",
+  "filters": {
+    "categories": ["Dimensions", "Exterior"]
+  },
+  "max_chunks": 6
+}
+
+### TC-RET-007: Query with campaign variant filter
+### Expected: 200 OK with data from specific campaign only
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "campaign_variant_id": "{{campaignId}}",
+  "question": "What is the horsepower?",
+  "max_chunks": 6
+}
+
+### TC-RET-008: Cache hit test - second identical query faster
+### Expected: 200 OK with latency_ms lower on repeat
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "What is the fuel efficiency?",
+  "max_chunks": 6
+}
+
+### TC-RET-009: Multi-product query
+### Expected: 200 OK with facts from multiple products
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}", "00000000-0000-0000-0000-000000000004"],
+  "question": "Compare the safety features",
+  "max_chunks": 8
+}
+
+### TC-RET-010: Query with lineage requested
+### Expected: 200 OK with lineage array populated
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "What is the torque?",
+  "include_lineage": true,
+  "max_chunks": 4
+}
+
+### ============================================================================
+### Error Cases
+### ============================================================================
+
+### TC-RET-ERR-001: Missing tenant ID - Unauthorized
+### Expected: 401 Unauthorized
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+
+{
+  "product_ids": ["{{productId}}"],
+  "question": "What is the price?"
+}
+
+### TC-RET-ERR-002: Empty question - Bad Request
+### Expected: 400 Bad Request
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": ""
+}
+
+### TC-RET-ERR-003: Invalid product ID format - Bad Request
+### Expected: 400 Bad Request
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["not-a-uuid"],
+  "question": "What is the mileage?"
+}
+
+### TC-RET-ERR-004: Cross-tenant product access - Forbidden
+### Expected: 403 Forbidden or empty results
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["00000000-0000-0000-0000-999999999999"],
+  "question": "What is the price?"
+}
+
+### ============================================================================
+### Performance Validation
+### ============================================================================
+
+### TC-RET-PERF-001: Latency within SLA (≤150ms p50)
+### Expected: 200 OK with latency_ms ≤ 150
+POST {{baseUrl}}/retrieval/query
+Content-Type: application/json
+X-Tenant-ID: {{tenantId}}
+
+{
+  "tenant_id": "{{tenantId}}",
+  "product_ids": ["{{productId}}"],
+  "question": "What is the engine displacement?",
+  "max_chunks": 6
+}
+

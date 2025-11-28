@@ -5,7 +5,7 @@
 - Docker Desktop (for Postgres 16 + Redis + PGVector via Testcontainers/dev compose)
 - SQLite 3 CLI (`brew install sqlite`)
 - `sqlc` and `golangci-lint` installed locally
-- OpenAI/OpenRouter API key (only if exercising semantic reranking in dev)
+- OpenAI/OpenRouter API key (required for vector search in `knowledge-demo`)
 
 ## 2. Environment Setup
 ```bash
@@ -27,7 +27,7 @@ Create a `.env.local` at repo root:
 DATABASE_URL=sqlite:///tmp/knowledge-engine.db
 POSTGRES_URL=postgres://postgres:postgres@localhost:5433/knowledge_engine?sslmode=disable
 REDIS_URL=redis://localhost:6380
-EMBEDDING_MODEL=text-embedding-3-small
+OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
 ## 3. Run Dev Databases
@@ -37,6 +37,16 @@ docker compose -f ops/dev/knowledge-engine-compose.yml up -d
 ```
 
 ## 4. CLI Workflows
+
+### Interactive Demo (Local Vector Search)
+```bash
+cd libs/knowledge-engine
+# Run the interactive demo with in-memory vector search
+# Make sure OPENROUTER_API_KEY is set in your environment
+go run ./cmd/knowledge-demo
+```
+
+### Production CLI
 ```bash
 cd libs/knowledge-engine
 

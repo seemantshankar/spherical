@@ -1,0 +1,97 @@
+# Development configuration for Knowledge Engine
+# Copy to configs/local.yaml and adjust for your environment
+
+server:
+  host: "0.0.0.0"
+  port: 8085
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  graceful_shutdown: 10s
+
+database:
+  driver: sqlite
+  sqlite:
+    path: "/tmp/knowledge-engine.db"
+    max_open_conns: 1
+    journal_mode: WAL
+  postgres:
+    dsn: "postgres://postgres:postgres@localhost:5433/knowledge_engine?sslmode=disable"
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: 5m
+
+vector:
+  adapter: faiss # faiss (dev) or pgvector (prod)
+  faiss:
+    index_path: "/tmp/knowledge-engine.faiss"
+    dimension: 768
+    nlist: 100
+  pgvector:
+    # Uses same DSN as database.postgres
+    index_type: ivfflat
+    lists: 100
+
+cache:
+  driver: memory # memory (dev) or redis (prod)
+  ttl: 5m
+  max_entries: 10000
+  redis:
+    addr: "localhost:6380"
+    password: ""
+    db: 0
+    pool_size: 10
+
+embedding:
+  model: "text-embedding-3-small"
+  dimension: 768
+  batch_size: 100
+  # API key loaded from OPENAI_API_KEY or OPENROUTER_API_KEY env var
+
+retrieval:
+  max_chunks: 8
+  structured_first: true
+  semantic_fallback: true
+  intent_confidence_threshold: 0.7
+  cache_results: true
+
+ingestion:
+  pdf_extractor_path: "../pdf-extractor/cmd/pdf-extractor"
+  max_concurrent_jobs: 2
+  chunk_size: 512
+  chunk_overlap: 64
+  dedupe_threshold: 0.95
+
+comparison:
+  max_dimensions: 20
+  refresh_interval: 24h
+  stale_threshold: 168h # 7 days
+
+drift:
+  check_interval: 24h
+  freshness_threshold: 4320h # 180 days
+  alert_channel: "drift.alerts"
+
+observability:
+  log_level: debug
+  log_format: json
+  otel:
+    enabled: false
+    endpoint: "http://localhost:4317"
+    service_name: "knowledge-engine"
+
+auth:
+  enabled: false # Enable in prod
+  oauth2:
+    issuer: "https://auth.spherical.local"
+    audience: "knowledge-engine"
+  mtls:
+    enabled: false
+    ca_cert: ""
+    server_cert: ""
+    server_key: ""
+
+tenancy:
+  default_tenant: "dev"
+  isolation_mode: "row_level" # row_level or schema
+

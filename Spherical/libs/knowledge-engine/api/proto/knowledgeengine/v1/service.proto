@@ -1,0 +1,298 @@
+syntax = "proto3";
+
+package knowledgeengine.v1;
+
+option go_package = "github.com/spherical-ai/spherical/libs/knowledge-engine/api/proto/knowledgeengine/v1;knowledgeenginev1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// KnowledgeEngineService provides hybrid retrieval, ingestion, and governance operations.
+service KnowledgeEngineService {
+  // RetrieveKnowledge queries structured specs and semantic chunks.
+  rpc RetrieveKnowledge(RetrievalRequest) returns (RetrievalResponse);
+
+  // CompareProducts returns comparison rows between products.
+  rpc CompareProducts(ComparisonRequest) returns (ComparisonResponse);
+
+  // GetLineage returns lineage events for a resource.
+  rpc GetLineage(LineageRequest) returns (LineageResponse);
+
+  // IngestCampaign triggers brochure ingestion.
+  rpc IngestCampaign(IngestionRequest) returns (IngestionJob);
+
+  // PublishCampaign promotes a draft to published.
+  rpc PublishCampaign(PublishRequest) returns (CampaignVersion);
+
+  // WatchIngestionJob streams ingestion job updates.
+  rpc WatchIngestionJob(WatchIngestionRequest) returns (stream IngestionJob);
+
+  // WatchDriftAlerts streams drift alerts for a tenant.
+  rpc WatchDriftAlerts(WatchDriftRequest) returns (stream DriftAlert);
+}
+
+// Retrieval Messages
+
+message RetrievalRequest {
+  string tenant_id = 1;
+  repeated string product_ids = 2;
+  optional string campaign_variant_id = 3;
+  string question = 4;
+  optional IntentType intent_hint = 5;
+  repeated ConversationMessage conversation_context = 6;
+  optional RetrievalFilters filters = 7;
+  optional int32 max_chunks = 8;
+  optional bool include_lineage = 9;
+}
+
+message ConversationMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message RetrievalFilters {
+  repeated string categories = 1;
+  repeated ChunkType chunk_types = 2;
+}
+
+message RetrievalResponse {
+  IntentType intent = 1;
+  int32 latency_ms = 2;
+  repeated SpecFact structured_facts = 3;
+  repeated SemanticChunk semantic_chunks = 4;
+  repeated ComparisonRow comparisons = 5;
+  repeated LineageEvent lineage = 6;
+}
+
+message SpecFact {
+  string spec_item_id = 1;
+  string category = 2;
+  string name = 3;
+  string value = 4;
+  optional string unit = 5;
+  float confidence = 6;
+  string campaign_variant_id = 7;
+  SourceRef source = 8;
+}
+
+message SemanticChunk {
+  string chunk_id = 1;
+  ChunkType chunk_type = 2;
+  string text = 3;
+  float distance = 4;
+  google.protobuf.Struct metadata = 5;
+  SourceRef source = 6;
+}
+
+message SourceRef {
+  optional string document_source_id = 1;
+  optional int32 page = 2;
+  optional string url = 3;
+}
+
+// Comparison Messages
+
+message ComparisonRequest {
+  string tenant_id = 1;
+  string primary_product_id = 2;
+  string secondary_product_id = 3;
+  repeated string dimensions = 4;
+  optional int32 max_rows = 5;
+}
+
+message ComparisonResponse {
+  repeated ComparisonRow comparisons = 1;
+}
+
+message ComparisonRow {
+  string dimension = 1;
+  string primary_product_id = 2;
+  string secondary_product_id = 3;
+  optional string primary_value = 4;
+  optional string secondary_value = 5;
+  Verdict verdict = 6;
+  optional string narrative = 7;
+  Shareability shareability = 8;
+  ComparisonSource source = 9;
+}
+
+message ComparisonSource {
+  optional string primary_spec_id = 1;
+  optional string secondary_spec_id = 2;
+}
+
+// Lineage Messages
+
+message LineageRequest {
+  string tenant_id = 1;
+  ResourceType resource_type = 2;
+  string resource_id = 3;
+}
+
+message LineageResponse {
+  string resource_id = 1;
+  repeated LineageEvent events = 2;
+}
+
+message LineageEvent {
+  string id = 1;
+  string resource_type = 2;
+  string resource_id = 3;
+  LineageAction action = 4;
+  optional string operator = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+  optional string document_source_id = 7;
+  optional string ingestion_job_id = 8;
+  google.protobuf.Struct diff = 9;
+}
+
+// Ingestion Messages
+
+message IngestionRequest {
+  string tenant_id = 1;
+  string product_id = 2;
+  string campaign_id = 3;
+  DocumentSource document_source = 4;
+  string markdown_url = 5;
+  optional bool overwrite_draft = 6;
+  optional bool auto_publish = 7;
+  string operator = 8;
+  google.protobuf.Struct metadata = 9;
+}
+
+message DocumentSource {
+  string id = 1;
+  string sha256 = 2;
+}
+
+message IngestionJob {
+  string id = 1;
+  JobStatus status = 2;
+  optional google.protobuf.Timestamp started_at = 3;
+  optional int32 eta_seconds = 4;
+  repeated string conflicting_spec_ids = 5;
+  optional string error = 6;
+}
+
+message WatchIngestionRequest {
+  string job_id = 1;
+}
+
+// Publish Messages
+
+message PublishRequest {
+  string tenant_id = 1;
+  string campaign_id = 2;
+  int32 version = 3;
+  string approved_by = 4;
+  optional string release_notes = 5;
+}
+
+message CampaignVersion {
+  string campaign_id = 1;
+  int32 version = 2;
+  CampaignStatus status = 3;
+  optional google.protobuf.Timestamp effective_from = 4;
+  optional google.protobuf.Timestamp effective_through = 5;
+  optional string published_by = 6;
+}
+
+// Drift Messages
+
+message WatchDriftRequest {
+  string tenant_id = 1;
+}
+
+message DriftAlert {
+  string id = 1;
+  string tenant_id = 2;
+  optional string product_id = 3;
+  optional string campaign_variant_id = 4;
+  AlertType alert_type = 5;
+  google.protobuf.Struct details = 6;
+  AlertStatus status = 7;
+  google.protobuf.Timestamp detected_at = 8;
+  optional google.protobuf.Timestamp resolved_at = 9;
+}
+
+// Enums
+
+enum IntentType {
+  INTENT_TYPE_UNSPECIFIED = 0;
+  INTENT_TYPE_SPEC_LOOKUP = 1;
+  INTENT_TYPE_USP_LOOKUP = 2;
+  INTENT_TYPE_COMPARISON = 3;
+  INTENT_TYPE_FAQ = 4;
+  INTENT_TYPE_UNKNOWN = 5;
+}
+
+enum ChunkType {
+  CHUNK_TYPE_UNSPECIFIED = 0;
+  CHUNK_TYPE_SPEC_ROW = 1;
+  CHUNK_TYPE_FEATURE_BLOCK = 2;
+  CHUNK_TYPE_USP = 3;
+  CHUNK_TYPE_FAQ = 4;
+  CHUNK_TYPE_COMPARISON = 5;
+  CHUNK_TYPE_GLOBAL = 6;
+}
+
+enum ResourceType {
+  RESOURCE_TYPE_UNSPECIFIED = 0;
+  RESOURCE_TYPE_SPEC_VALUE = 1;
+  RESOURCE_TYPE_FEATURE_BLOCK = 2;
+  RESOURCE_TYPE_KNOWLEDGE_CHUNK = 3;
+  RESOURCE_TYPE_COMPARISON = 4;
+}
+
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_PRIMARY_BETTER = 1;
+  VERDICT_SECONDARY_BETTER = 2;
+  VERDICT_EQUAL = 3;
+  VERDICT_CANNOT_COMPARE = 4;
+}
+
+enum Shareability {
+  SHAREABILITY_UNSPECIFIED = 0;
+  SHAREABILITY_PRIVATE = 1;
+  SHAREABILITY_TENANT = 2;
+  SHAREABILITY_PUBLIC = 3;
+}
+
+enum CampaignStatus {
+  CAMPAIGN_STATUS_UNSPECIFIED = 0;
+  CAMPAIGN_STATUS_DRAFT = 1;
+  CAMPAIGN_STATUS_PUBLISHED = 2;
+  CAMPAIGN_STATUS_ARCHIVED = 3;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_PENDING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_FAILED = 3;
+  JOB_STATUS_SUCCEEDED = 4;
+}
+
+enum LineageAction {
+  LINEAGE_ACTION_UNSPECIFIED = 0;
+  LINEAGE_ACTION_CREATED = 1;
+  LINEAGE_ACTION_UPDATED = 2;
+  LINEAGE_ACTION_DELETED = 3;
+  LINEAGE_ACTION_RECONCILED = 4;
+}
+
+enum AlertType {
+  ALERT_TYPE_UNSPECIFIED = 0;
+  ALERT_TYPE_STALE_CAMPAIGN = 1;
+  ALERT_TYPE_CONFLICT_DETECTED = 2;
+  ALERT_TYPE_HASH_CHANGED = 3;
+}
+
+enum AlertStatus {
+  ALERT_STATUS_UNSPECIFIED = 0;
+  ALERT_STATUS_OPEN = 1;
+  ALERT_STATUS_ACKNOWLEDGED = 2;
+  ALERT_STATUS_RESOLVED = 3;
+}
+

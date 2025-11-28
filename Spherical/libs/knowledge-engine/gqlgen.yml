@@ -1,0 +1,53 @@
+# gqlgen configuration for Knowledge Engine GraphQL API
+schema:
+  - internal/api/graphql/schema.graphqls
+
+exec:
+  filename: internal/api/graphql/generated.go
+  package: graphql
+
+model:
+  filename: internal/api/graphql/models_gen.go
+  package: graphql
+
+resolver:
+  layout: follow-schema
+  dir: internal/api/graphql
+  package: graphql
+  filename_template: "{name}.resolvers.go"
+  omit_template_comment: false
+
+autobind:
+  - github.com/spherical-ai/spherical/libs/knowledge-engine/internal/storage
+
+models:
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.ID
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+      - github.com/99designs/gqlgen/graphql.Int32
+
+  UUID:
+    model:
+      - github.com/google/uuid.UUID
+
+  DateTime:
+    model:
+      - github.com/99designs/gqlgen/graphql.Time
+
+  JSON:
+    model:
+      - github.com/99designs/gqlgen/graphql.Map
+
+  # Domain models will be bound automatically via autobind
+  # Add explicit mappings here if names differ
+
+omit_slice_element_pointers: true
+omit_getters: true
+struct_fields_always_pointers: false
+resolvers_always_return_pointers: false
+return_pointers_in_unmarshal_input: false
+omit_complexity: false
+omit_panic_handler: false
+
