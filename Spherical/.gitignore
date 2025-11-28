@@ -1,69 +1,26 @@
-# Binaries for programs and plugins
+# Go
+bin/
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
 *.test
-
-# Output of the go coverage tool
+vendor/
 *.out
-
-# Go workspace file
+*.o
+*.a
+*.so
+*.dll
+*.dylib
 go.work
 go.work.sum
 
-# Dependency directories
-vendor/
+# Environments
+.env
+.env.*
+!.env.example
+!.env.template
 
-# Build artifacts
-bin/
-dist/
-build/
-
-# IDE
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Environment variables
-.env
-.env.local
-.env.*.local
-
-# Temporary files
-*.tmp
-*.temp
-tmp/
-temp/
-
-# Logs
-*.log
-logs/
-
-# Coverage reports
-coverage/
-*.coverage
-*.coverprofile
-
-# Generated files
-*.generated.go
-
-# Temporary images from PDF conversion
-*.jpg.tmp
-tmp_images/
-
-
-
-
-
-
-

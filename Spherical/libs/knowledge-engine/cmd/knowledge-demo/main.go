@@ -17,6 +17,7 @@ import (
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/embedding"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/ingest"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/observability"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/retrieval"
 )
 
 const (
@@ -31,11 +32,12 @@ const (
 )
 
 type KnowledgeBase struct {
-	db         *sql.DB
-	tenantID   uuid.UUID
-	productID  uuid.UUID
-	campaignID uuid.UUID
-	embedder   embedding.Embedder
+	db            *sql.DB
+	tenantID      uuid.UUID
+	productID     uuid.UUID
+	campaignID    uuid.UUID
+	embedder      embedding.Embedder
+	vectorAdapter *retrieval.FAISSAdapter
 }
 
 type scoredSpec struct {
@@ -93,9 +95,13 @@ func main() {
 		fmt.Printf("%s⚠ Using mock embeddings (set OPENROUTER_API_KEY for real embeddings)%s\n", colorYellow, colorReset)
 	}
 
+	// Initialize vector adapter
+	vectorAdapter, _ := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{Dimension: 768})
+
 	kb := &KnowledgeBase{
-		db:       db,
-		embedder: embedder,
+		db:            db,
+		embedder:      embedder,
+		vectorAdapter: vectorAdapter,
 	}
 
 	// Check if we need to ingest data
@@ -107,7 +113,7 @@ func main() {
 		}
 	} else {
 		fmt.Printf("%s✓ Found existing data%s\n", colorGreen, colorReset)
-		kb.loadExistingIDs()
+		kb.loadData(ctx)
 	}
 
 	// Print stats
@@ -170,10 +176,68 @@ func (kb *KnowledgeBase) hasData() bool {
 	return err == nil && count > 0
 }
 
-func (kb *KnowledgeBase) loadExistingIDs() {
+func (kb *KnowledgeBase) loadData(ctx context.Context) {
 	kb.db.QueryRow("SELECT id FROM tenants LIMIT 1").Scan(&kb.tenantID)
 	kb.db.QueryRow("SELECT id FROM products LIMIT 1").Scan(&kb.productID)
 	kb.db.QueryRow("SELECT id FROM campaign_variants LIMIT 1").Scan(&kb.campaignID)
+
+	// Load vectors
+	fmt.Print("Loading vectors into memory... ")
+	rows, err := kb.db.Query("SELECT id, tenant_id, product_id, campaign_variant_id, chunk_type, embedding_vector, metadata FROM knowledge_chunks")
+	if err != nil {
+		fmt.Printf("Error loading vectors: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	count := 0
+	var entries []retrieval.VectorEntry
+	for rows.Next() {
+		var id, tenantID, productID string
+		var campaignID sql.NullString
+		var chunkType string
+		var embBytes []byte
+		var metadataJSON string
+
+		if err := rows.Scan(&id, &tenantID, &productID, &campaignID, &chunkType, &embBytes, &metadataJSON); err != nil {
+			continue
+		}
+
+		if len(embBytes) == 0 {
+			continue
+		}
+
+		var vector []float32
+		if err := json.Unmarshal(embBytes, &vector); err != nil {
+			continue
+		}
+
+		var metadata map[string]interface{}
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &metadata)
+		}
+
+		entry := retrieval.VectorEntry{
+			ID:        uuid.MustParse(id),
+			TenantID:  uuid.MustParse(tenantID),
+			ProductID: uuid.MustParse(productID),
+			ChunkType: chunkType,
+			Vector:    vector,
+			Metadata:  metadata,
+		}
+		if campaignID.Valid {
+			cid := uuid.MustParse(campaignID.String)
+			entry.CampaignVariantID = &cid
+		}
+
+		entries = append(entries, entry)
+		count++
+	}
+
+	if len(entries) > 0 {
+		kb.vectorAdapter.Insert(ctx, entries)
+	}
+	fmt.Printf("✓ Loaded %d vectors\n", count)
 }
 
 func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
@@ -245,27 +309,88 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 			value_text, unit, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			specValueID.String(), kb.tenantID.String(), kb.productID.String(), kb.campaignID.String(),
 			specItemID.String(), spec.Value, spec.Unit, spec.Confidence)
+
+		// Embed spec for vector search
+		if kb.embedder != nil {
+			specText := fmt.Sprintf("%s: %s - %s %s", spec.Category, spec.Name, spec.Value, spec.Unit)
+			
+			// Simple retry logic for rate limits
+			var emb []float32
+			var err error
+			for retry := 0; retry < 3; retry++ {
+				emb, err = kb.embedder.EmbedSingle(ctx, specText)
+				if err == nil {
+					break
+				}
+				// If rate limited, wait and retry
+				time.Sleep(time.Duration(retry+1) * 500 * time.Millisecond)
+			}
+
+			if err == nil {
+				chunkID := uuid.New()
+				embBytes, _ := json.Marshal(emb)
+				metadata := map[string]interface{}{
+					"spec_value_id": specValueID.String(),
+					"category":      spec.Category,
+					"name":          spec.Name,
+				}
+				metadataBytes, _ := json.Marshal(metadata)
+
+				kb.db.Exec(`INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, 
+					chunk_type, text, metadata, embedding_vector, embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					chunkID.String(), kb.tenantID.String(), kb.productID.String(), kb.campaignID.String(),
+					"spec_row", specText, string(metadataBytes), embBytes, kb.embedder.Model())
+
+				kb.vectorAdapter.Insert(ctx, []retrieval.VectorEntry{{
+					ID:                chunkID,
+					TenantID:          kb.tenantID,
+					ProductID:         kb.productID,
+					CampaignVariantID: &kb.campaignID,
+					ChunkType:         "spec_row",
+					Vector:            emb,
+					Metadata:          metadata,
+				}})
+			} else {
+				fmt.Printf("Warning: failed to embed spec: %v\n", err)
+			}
+		}
 	}
 	fmt.Printf("%s✓%s\n", colorGreen, colorReset)
 
 	// Store features and USPs with embeddings
 	totalChunks := len(result.Features) + len(result.USPs)
-	fmt.Printf("Storing %d knowledge chunks with embeddings... ", totalChunks)
+	fmt.Printf("Storing %d knowledge chunks (features/USPs) with embeddings... ", totalChunks)
 
 	chunkCount := 0
 	for _, feature := range result.Features {
 		chunkID := uuid.New()
 		var embVector []byte
+		var emb []float32
 		if kb.embedder != nil {
-			if emb, err := kb.embedder.EmbedSingle(ctx, feature.Body); err == nil {
+			if e, err := kb.embedder.EmbedSingle(ctx, feature.Body); err == nil {
+				emb = e
 				embVector, _ = json.Marshal(emb)
 			}
 		}
-		metadata, _ := json.Marshal(map[string]interface{}{"tags": feature.Tags})
+		meta := map[string]interface{}{"tags": feature.Tags}
+		metadata, _ := json.Marshal(meta)
 		kb.db.Exec(`INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, 
 			chunk_type, text, metadata, embedding_vector, embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			chunkID.String(), kb.tenantID.String(), kb.productID.String(), kb.campaignID.String(),
 			"feature_block", feature.Body, string(metadata), embVector, kb.embedder.Model())
+
+		if len(emb) > 0 {
+			kb.vectorAdapter.Insert(ctx, []retrieval.VectorEntry{{
+				ID:                chunkID,
+				TenantID:          kb.tenantID,
+				ProductID:         kb.productID,
+				CampaignVariantID: &kb.campaignID,
+				ChunkType:         "feature_block",
+				Vector:            emb,
+				Metadata:          meta,
+			}})
+		}
+
 		chunkCount++
 		if chunkCount%20 == 0 {
 			fmt.Printf("\rStoring %d knowledge chunks with embeddings... %d/%d", totalChunks, chunkCount, totalChunks)
@@ -275,8 +400,10 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 	for _, usp := range result.USPs {
 		chunkID := uuid.New()
 		var embVector []byte
+		var emb []float32
 		if kb.embedder != nil {
-			if emb, err := kb.embedder.EmbedSingle(ctx, usp.Body); err == nil {
+			if e, err := kb.embedder.EmbedSingle(ctx, usp.Body); err == nil {
+				emb = e
 				embVector, _ = json.Marshal(emb)
 			}
 		}
@@ -284,6 +411,19 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 			chunk_type, text, embedding_vector, embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			chunkID.String(), kb.tenantID.String(), kb.productID.String(), kb.campaignID.String(),
 			"usp", usp.Body, embVector, kb.embedder.Model())
+
+		if len(emb) > 0 {
+			kb.vectorAdapter.Insert(ctx, []retrieval.VectorEntry{{
+				ID:                chunkID,
+				TenantID:          kb.tenantID,
+				ProductID:         kb.productID,
+				CampaignVariantID: &kb.campaignID,
+				ChunkType:         "usp",
+				Vector:            emb,
+				Metadata:          map[string]interface{}{"type": "usp"},
+			}})
+		}
+
 		chunkCount++
 	}
 
@@ -315,6 +455,45 @@ func (kb *KnowledgeBase) runQuery(ctx context.Context, query string) {
 
 	// Search specs with relevance scoring
 	specMap := make(map[string]*scoredSpec) // Use key to deduplicate
+
+	// Vector Search (Semantic)
+	if kb.vectorAdapter != nil && kb.embedder != nil {
+		emb, err := kb.embedder.EmbedSingle(ctx, query)
+		if err == nil {
+			// Search for top 20 matches
+			results, _ := kb.vectorAdapter.Search(ctx, emb, 20, retrieval.VectorFilters{
+				TenantID:          &kb.tenantID,
+				CampaignVariantID: &kb.campaignID,
+			})
+
+			for _, res := range results {
+				score := int(res.Score * 20) // Base score on similarity (0-20)
+
+				if specID, ok := res.Metadata["spec_value_id"].(string); ok {
+					// It's a spec row
+					var s scoredSpec
+					err := kb.db.QueryRow(`
+						SELECT sc.name, si.display_name, sv.value_text, COALESCE(sv.unit, ''), sv.confidence 
+						FROM spec_values sv 
+						JOIN spec_items si ON sv.spec_item_id = si.id
+						JOIN spec_categories sc ON si.category_id = sc.id
+						WHERE sv.id = ?`, specID).Scan(&s.Category, &s.Name, &s.Value, &s.Unit, &s.Confidence)
+
+					if err == nil {
+						s.Score = score + 5 // Boost vector matches
+						key := s.Category + "|" + s.Name + "|" + s.Value
+						if existing, ok := specMap[key]; ok {
+							if s.Score > existing.Score {
+								existing.Score = s.Score
+							}
+						} else {
+							specMap[key] = &s
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// First, search for compound terms (higher priority)
 	for _, term := range compoundTerms {
@@ -438,6 +617,25 @@ func (kb *KnowledgeBase) runQuery(ctx context.Context, query string) {
 	var chunks []struct {
 		Type string
 		Text string
+	}
+
+	// Vector Search for Chunks
+	if kb.vectorAdapter != nil && kb.embedder != nil {
+		emb, err := kb.embedder.EmbedSingle(ctx, query)
+		if err == nil {
+			results, _ := kb.vectorAdapter.Search(ctx, emb, 10, retrieval.VectorFilters{
+				TenantID:          &kb.tenantID,
+				CampaignVariantID: &kb.campaignID,
+				ChunkTypes:        []string{"feature_block", "usp", "faq"}, // Exclude spec_row
+			})
+			for _, res := range results {
+				var text, chunkType string
+				kb.db.QueryRow("SELECT text, chunk_type FROM knowledge_chunks WHERE id = ?", res.ID).Scan(&text, &chunkType)
+				if text != "" {
+					chunks = append(chunks, struct{Type string; Text string}{chunkType, text})
+				}
+			}
+		}
 	}
 
 	// Try compound terms first (higher priority)

@@ -83,7 +83,7 @@
 - [X] T035 [US2] Implement gRPC/Connect retrieval service (`internal/api/grpc/retrieval_service.go`) plus contract tests.
 - [X] T036 [US2] Handle edge cases (deleted campaigns, trim mismatches) by falling back to last published variant and surfacing policy-compliant responses in `internal/retrieval/fallbacks.go`.
 - [X] T037 [US2] Add CLI query command in `cmd/knowledge-engine-cli/main.go` (query subcommand) with JSON output.
-- [ ] T037a [P] [US2] Enhance `knowledge-demo` CLI with in-memory vector search for local semantic retrieval (embedding specs + cosine similarity) to resolve keyword mismatch issues (e.g., "child safety" vs "ISOFIX").
+- [X] T037a [P] [US2] Enhance `knowledge-demo` CLI with in-memory vector search for local semantic retrieval (embedding specs + cosine similarity) to resolve keyword mismatch issues (e.g., "child safety" vs "ISOFIX").
 - [X] T038 [US2] Wire audit logging into retrieval handlers/CLI (`internal/monitoring/audit_logger.go`) covering request metadata + response citations.
 
 ---

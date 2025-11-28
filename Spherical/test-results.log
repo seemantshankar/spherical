@@ -1,0 +1,160 @@
+=== RUN   TestInvalidFileHandling
+=== RUN   TestInvalidFileHandling/non-existent_file
+=== RUN   TestInvalidFileHandling/empty_path
+=== RUN   TestInvalidFileHandling/directory_instead_of_file
+--- PASS: TestInvalidFileHandling (0.00s)
+    --- PASS: TestInvalidFileHandling/non-existent_file (0.00s)
+    --- PASS: TestInvalidFileHandling/empty_path (0.00s)
+    --- PASS: TestInvalidFileHandling/directory_instead_of_file (0.00s)
+=== RUN   TestAPIErrorHandling
+=== RUN   TestAPIErrorHandling/empty_API_key
+=== RUN   TestAPIErrorHandling/invalid_API_key
+--- PASS: TestAPIErrorHandling (0.21s)
+    --- PASS: TestAPIErrorHandling/empty_API_key (0.16s)
+    --- PASS: TestAPIErrorHandling/invalid_API_key (0.05s)
+=== RUN   TestLargeFileHandling
+=== RUN   TestLargeFileHandling/Arena-Wagon-r-Brochure.pdf
+[extract] 2025/11/22 16:03:57 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf
+warning: premature end of data in flate filter
+[extract] 2025/11/22 16:04:00 [INFO] Converted 6 pages
+[extract] 2025/11/22 16:04:00 [INFO] Processing page 1
+[extract] 2025/11/22 16:04:10 [INFO] Processing page 2
+[extract] 2025/11/22 16:04:13 [INFO] Processing page 3
+[extract] 2025/11/22 16:04:17 [INFO] Processing page 4
+[extract] 2025/11/22 16:04:22 [INFO] Processing page 5
+[extract] 2025/11/22 16:04:35 [INFO] Processing page 6
+[extract] 2025/11/22 16:04:39 [INFO] Extraction complete: 6 successful, 0 failed
+warning: ... repeated 2 times...
+=== RUN   TestLargeFileHandling/Kia_Carens_Clavis_Desktop.pdf
+[extract] 2025/11/22 16:04:39 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Kia_Carens_Clavis_Desktop.pdf
+warning: premature end of data in flate filter
+[extract] 2025/11/22 16:04:44 [INFO] Converted 9 pages
+[extract] 2025/11/22 16:04:44 [INFO] Processing page 1
+[extract] 2025/11/22 16:04:49 [INFO] Processing page 2
+[extract] 2025/11/22 16:04:54 [INFO] Processing page 3
+[extract] 2025/11/22 16:05:00 [INFO] Processing page 4
+[extract] 2025/11/22 16:05:05 [INFO] Processing page 5
+[extract] 2025/11/22 16:05:11 [INFO] Processing page 6
+[extract] 2025/11/22 16:05:16 [INFO] Processing page 7
+[extract] 2025/11/22 16:05:23 [INFO] Processing page 8
+[extract] 2025/11/22 16:05:36 [INFO] Processing page 9
+[extract] 2025/11/22 16:05:42 [INFO] Extraction complete: 9 successful, 0 failed
+=== RUN   TestLargeFileHandling/Volvo_XC90_Brochure.pdf
+[extract] 2025/11/22 16:05:42 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Volvo XC90 Brochure.pdf
+warning: premature end of data in flate filter
+[extract] 2025/11/22 16:05:43 [INFO] Converted 2 pages
+[extract] 2025/11/22 16:05:43 [INFO] Processing page 1
+[extract] 2025/11/22 16:05:51 [INFO] Processing page 2
+[extract] 2025/11/22 16:05:59 [INFO] Extraction complete: 2 successful, 0 failed
+warning: ... repeated 2 times...
+=== RUN   TestLargeFileHandling/e-brochure-camry-hybrid.pdf
+[extract] 2025/11/22 16:05:59 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/e-brochure-camry-hybrid.pdf
+warning: freetype could not find any cmaps
+[extract] 2025/11/22 16:06:04 [INFO] Converted 22 pages
+[extract] 2025/11/22 16:06:04 [INFO] Processing page 1
+[extract] 2025/11/22 16:06:08 [INFO] Processing page 2
+[extract] 2025/11/22 16:06:12 [INFO] Processing page 3
+[extract] 2025/11/22 16:10:22 [INFO] Processing page 4
+[extract] 2025/11/22 16:10:27 [INFO] Processing page 5
+[extract] 2025/11/22 16:10:31 [INFO] Processing page 6
+[extract] 2025/11/22 16:10:38 [INFO] Processing page 7
+[extract] 2025/11/22 16:10:46 [INFO] Processing page 8
+[extract] 2025/11/22 16:10:53 [INFO] Processing page 9
+[extract] 2025/11/22 16:11:00 [INFO] Processing page 10
+[extract] 2025/11/22 16:11:05 [INFO] Processing page 11
+[extract] 2025/11/22 16:11:11 [INFO] Processing page 12
+[extract] 2025/11/22 16:11:18 [INFO] Processing page 13
+[extract] 2025/11/22 16:11:27 [INFO] Processing page 14
+[extract] 2025/11/22 16:11:31 [INFO] Processing page 15
+[extract] 2025/11/22 16:11:42 [INFO] Processing page 16
+[extract] 2025/11/22 16:11:51 [INFO] Processing page 17
+[extract] 2025/11/22 16:11:57 [INFO] Processing page 18
+[extract] 2025/11/22 16:12:04 [INFO] Processing page 19
+[extract] 2025/11/22 16:12:10 [INFO] Processing page 20
+[extract] 2025/11/22 16:12:17 [INFO] Processing page 21
+[extract] 2025/11/22 16:12:24 [INFO] Processing page 22
+[extract] 2025/11/22 16:12:29 [INFO] Extraction complete: 22 successful, 0 failed
+--- PASS: TestLargeFileHandling (266.47s)
+    --- PASS: TestLargeFileHandling/Arena-Wagon-r-Brochure.pdf (41.31s)
+    --- PASS: TestLargeFileHandling/Kia_Carens_Clavis_Desktop.pdf (62.83s)
+    --- PASS: TestLargeFileHandling/Volvo_XC90_Brochure.pdf (17.94s)
+    --- PASS: TestLargeFileHandling/e-brochure-camry-hybrid.pdf (144.39s)
+=== RUN   TestCleanupAfterError
+--- PASS: TestCleanupAfterError (0.00s)
+=== RUN   TestPDFToMarkdownConversion
+[extract] 2025/11/22 16:12:29 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf
+warning: premature end of data in flate filter
+[extract] 2025/11/22 16:12:32 [INFO] Converted 6 pages
+[extract] 2025/11/22 16:12:32 [INFO] Processing page 1
+    pdf_test.go:70: Processing page 1
+[extract] 2025/11/22 16:12:35 [INFO] Processing page 2
+    pdf_test.go:70: Processing page 2
+[extract] 2025/11/22 16:12:43 [INFO] Processing page 3
+    pdf_test.go:70: Processing page 3
+[extract] 2025/11/22 16:12:47 [INFO] Processing page 4
+    pdf_test.go:70: Processing page 4
+[extract] 2025/11/22 16:12:52 [INFO] Processing page 5
+    pdf_test.go:70: Processing page 5
+[extract] 2025/11/22 16:13:02 [INFO] Processing page 6
+    pdf_test.go:70: Processing page 6
+[extract] 2025/11/22 16:13:08 [INFO] Extraction complete: 6 successful, 0 failed
+    pdf_test.go:83: Processing complete
+    pdf_test.go:109: Markdown missing expected pattern: features
+    pdf_test.go:119: Output written to: /var/folders/2f/cv8lbqsd4xbc81gb82bj7qww0000gn/T/pdf-extraction-test-output.md
+warning: ... repeated 2 times...
+--- FAIL: TestPDFToMarkdownConversion (39.61s)
+=== RUN   TestMemoryUsageSequentialProcessing
+[extract] 2025/11/22 16:13:08 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf
+warning: premature end of data in flate filter
+[extract] 2025/11/22 16:13:11 [INFO] Converted 6 pages
+[extract] 2025/11/22 16:13:11 [INFO] Processing page 1
+[extract] 2025/11/22 16:13:15 [INFO] Processing page 2
+    perf_test.go:77: Page 1: Alloc=45 MB, TotalAlloc=4414 MB, Sys=274 MB
+[extract] 2025/11/22 16:13:20 [INFO] Processing page 3
+    perf_test.go:77: Page 2: Alloc=59 MB, TotalAlloc=4429 MB, Sys=274 MB
+[extract] 2025/11/22 16:13:27 [INFO] Processing page 4
+    perf_test.go:77: Page 3: Alloc=9 MB, TotalAlloc=4438 MB, Sys=274 MB
+[extract] 2025/11/22 16:13:34 [INFO] Processing page 5
+    perf_test.go:77: Page 4: Alloc=11 MB, TotalAlloc=4449 MB, Sys=274 MB
+[extract] 2025/11/22 16:13:49 [INFO] Processing page 6
+    perf_test.go:77: Page 5: Alloc=6 MB, TotalAlloc=4460 MB, Sys=274 MB
+[extract] 2025/11/22 16:13:53 [INFO] Extraction complete: 6 successful, 0 failed
+    perf_test.go:77: Page 6: Alloc=5 MB, TotalAlloc=4464 MB, Sys=274 MB
+    perf_test.go:93: Memory growth: 17592186044415 MB
+    perf_test.go:94: Pages processed: 6
+warning: ... repeated 2 times...
+--- PASS: TestMemoryUsageSequentialProcessing (44.53s)
+=== RUN   TestCleanupMemoryRelease
+warning: premature end of data in flate filter
+warning: ... repeated 2 times...
+--- PASS: TestCleanupMemoryRelease (3.03s)
+=== RUN   TestStreamingEvents
+[extract] 2025/11/22 16:13:56 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf
+warning: premature end of data in flate filter
+[extract] 2025/11/22 16:13:59 [INFO] Converted 6 pages
+[extract] 2025/11/22 16:13:59 [INFO] Processing page 1
+[extract] 2025/11/22 16:14:02 [INFO] Processing page 2
+[extract] 2025/11/22 16:14:06 [INFO] Processing page 3
+[extract] 2025/11/22 16:14:12 [INFO] Processing page 4
+[extract] 2025/11/22 16:14:17 [INFO] Processing page 5
+[extract] 2025/11/22 16:14:29 [INFO] Processing page 6
+[extract] 2025/11/22 16:14:34 [INFO] Extraction complete: 6 successful, 0 failed
+    stream_test.go:81: Event counts: map[complete:1 llm_streaming:85 page_complete:6 page_processing:6 start:1]
+    stream_test.go:82: Total stream chunks: 85
+warning: ... repeated 2 times...
+--- PASS: TestStreamingEvents (37.82s)
+=== RUN   TestModelConfigurationOverride
+=== RUN   TestModelConfigurationOverride/default_model
+=== RUN   TestModelConfigurationOverride/custom_model
+--- PASS: TestModelConfigurationOverride (0.00s)
+    --- PASS: TestModelConfigurationOverride/default_model (0.00s)
+    --- PASS: TestModelConfigurationOverride/custom_model (0.00s)
+=== RUN   TestStreamParserWithMockData
+--- PASS: TestStreamParserWithMockData (0.00s)
+=== RUN   TestContextCancellation
+[extract] 2025/11/22 16:14:34 [INFO] Converting PDF to images: /Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf
+    stream_test.go:199: Received 3 events before cancellation took effect
+--- PASS: TestContextCancellation (0.10s)
+FAIL
+FAIL	github.com/spherical/pdf-extractor/tests/integration	392.319s
+FAIL
