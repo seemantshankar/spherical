@@ -142,8 +142,8 @@ func (h *RetrievalHandler) Query(w http.ResponseWriter, r *http.Request) {
 
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
-		// Try to look up by name
-		tenantID = uuid.Nil // Would need to query by name
+		h.writeError(w, http.StatusBadRequest, "invalid tenantId", err.Error())
+		return
 	}
 
 	// Parse product IDs

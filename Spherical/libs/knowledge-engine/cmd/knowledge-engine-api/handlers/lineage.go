@@ -102,16 +102,47 @@ func (h *LineageHandler) GetLineage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// events will be nil if no results, convert to empty slice
-	_ = events
-
 	// Convert to DTO
 	resp := LineageResponseDTO{
 		ResourceID: resourceIDStr,
-		Events:     make([]LineageEventDTO, 0, len(events)),
+		Events:     make([]LineageEventDTO, 0),
 	}
 
-	// Note: events conversion would happen here when QueryLineage returns actual data
+	// Convert events to DTOs
+	if events != nil {
+		for _, event := range events {
+			dto := LineageEventDTO{
+				ID:           event.ID.String(),
+				ResourceType: event.ResourceType,
+				ResourceID:   event.ResourceID.String(),
+				Action:       string(event.Action),
+				OccurredAt:   event.OccurredAt.Format("2006-01-02T15:04:05Z07:00"),
+			}
+
+			// Set optional fields
+			if event.DocumentSourceID != nil {
+				dto.DocumentSourceID = event.DocumentSourceID.String()
+			}
+			if event.IngestionJobID != nil {
+				dto.IngestionJobID = event.IngestionJobID.String()
+			}
+
+			// Parse payload to extract operator and diff if present
+			if len(event.Payload) > 0 {
+				var payload map[string]interface{}
+				if err := json.Unmarshal(event.Payload, &payload); err == nil {
+					if operator, ok := payload["operator"].(string); ok {
+						dto.Operator = operator
+					}
+					if diff, ok := payload["diff"].(map[string]interface{}); ok {
+						dto.Diff = diff
+					}
+				}
+			}
+
+			resp.Events = append(resp.Events, dto)
+		}
+	}
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
