@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/joho/godotenv"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/cache"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/embedding"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/ingest"
@@ -54,6 +55,21 @@ type scoredSpec struct {
 }
 
 func main() {
+	// Load .env file from multiple possible locations
+	envPaths := []string{
+		".env",
+		"../pdf-extractor/.env",
+		"../../pdf-extractor/.env",
+		"../../../pdf-extractor/.env",
+		"../.env",
+		"../../.env",
+	}
+	for _, path := range envPaths {
+		if err := godotenv.Load(path); err == nil {
+			break // Successfully loaded, stop trying
+		}
+	}
+
 	printBanner()
 
 	ctx := context.Background()
@@ -247,6 +263,7 @@ func (kb *KnowledgeBase) loadData(ctx context.Context) {
 	defer rows.Close()
 
 	count := 0
+	chunkTypeCounts := make(map[string]int)
 	var entries []retrieval.VectorEntry
 	for rows.Next() {
 		var id, tenantID, productID string
@@ -287,13 +304,27 @@ func (kb *KnowledgeBase) loadData(ctx context.Context) {
 		}
 
 		entries = append(entries, entry)
+		chunkTypeCounts[chunkType]++
 		count++
 	}
 
 	if len(entries) > 0 {
 		kb.vectorAdapter.Insert(ctx, entries)
 	}
-	fmt.Printf("✓ Loaded %d vectors\n", count)
+	fmt.Printf("✓ Loaded %d vectors", count)
+	if len(chunkTypeCounts) > 0 {
+		fmt.Printf(" (")
+		first := true
+		for chunkType, cnt := range chunkTypeCounts {
+			if !first {
+				fmt.Printf(", ")
+			}
+			fmt.Printf("%d %s", cnt, chunkType)
+			first = false
+		}
+		fmt.Printf(")")
+	}
+	fmt.Println()
 }
 
 func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
@@ -350,9 +381,12 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 		kb.campaignID.String(), kb.productID.String(), kb.tenantID.String(), "en-IN", "XLE Hybrid", "published")
 
 	// Store specs
-	fmt.Print("Storing specifications... ")
+	totalSpecs := len(result.SpecValues)
+	fmt.Print("Storing specifications with embeddings... ")
+	os.Stdout.Sync() // Ensure the initial message is printed
 	categoryCache := make(map[string]uuid.UUID)
-	for _, spec := range result.SpecValues {
+	specCount := 0
+	for i, spec := range result.SpecValues {
 		categoryID, ok := categoryCache[spec.Category]
 		if !ok {
 			categoryID = uuid.New()
@@ -411,18 +445,33 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 					Vector:            emb,
 					Metadata:          metadata,
 				}})
+				specCount++
 			} else {
-				fmt.Printf("Warning: failed to embed spec: %v\n", err)
+				if i == 0 || i%10 == 0 { // Only show warnings occasionally to avoid spam
+					fmt.Printf("\nWarning: failed to embed spec %d/%d: %v\n", i+1, totalSpecs, err)
+				}
 			}
+		} else {
+			specCount++
+		}
+
+		// Show progress every 5 specs or at milestones - update inline (more frequent updates)
+		if (i+1)%5 == 0 || i == 0 || i == totalSpecs-1 {
+			// Clear line and update progress
+			fmt.Printf("\r\033[KStoring specifications with embeddings... %d/%d", i+1, totalSpecs)
+			os.Stdout.Sync() // Flush output to ensure it's displayed
 		}
 	}
-	fmt.Printf("%s✓%s\n", colorGreen, colorReset)
+	// Clear the line and show completion
+	fmt.Printf("\r%s✓%s Stored %d specifications                    \n", colorGreen, colorReset, specCount)
 
 	// Store features and USPs with embeddings
 	totalChunks := len(result.Features) + len(result.USPs)
-	fmt.Printf("Storing %d knowledge chunks (features/USPs) with embeddings... ", totalChunks)
+	fmt.Print("Storing knowledge chunks (features/USPs) with embeddings... ")
+	os.Stdout.Sync() // Ensure the initial message is printed
 
 	chunkCount := 0
+	totalProcessed := 0
 	for _, feature := range result.Features {
 		chunkID := uuid.New()
 		var embVector []byte
@@ -453,8 +502,12 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 		}
 
 		chunkCount++
-		if chunkCount%20 == 0 {
-			fmt.Printf("\rStoring %d knowledge chunks with embeddings... %d/%d", totalChunks, chunkCount, totalChunks)
+		totalProcessed++
+		// Show progress every 5 chunks or at milestones - update inline (more frequent updates)
+		if totalProcessed%5 == 0 || totalProcessed == 1 || totalProcessed == totalChunks {
+			// Clear line and update progress
+			fmt.Printf("\r\033[KStoring knowledge chunks (features/USPs) with embeddings... %d/%d", totalProcessed, totalChunks)
+			os.Stdout.Sync() // Flush output to ensure it's displayed
 		}
 	}
 
@@ -497,9 +550,16 @@ func (kb *KnowledgeBase) ingestBrochure(ctx context.Context) error {
 		}
 
 		chunkCount++
+		totalProcessed++
+		// Show progress every 5 chunks or at milestones - update inline (more frequent updates)
+		if totalProcessed%5 == 0 || totalProcessed == len(result.Features)+1 || totalProcessed == totalChunks {
+			// Clear line and update progress
+			fmt.Printf("\r\033[KStoring knowledge chunks (features/USPs) with embeddings... %d/%d", totalProcessed, totalChunks)
+			os.Stdout.Sync() // Flush output to ensure it's displayed
+		}
 	}
-
-	fmt.Printf("\r%s✓%s Stored %d knowledge chunks                    \n", colorGreen, colorReset, chunkCount)
+	// Clear the line and show completion
+	fmt.Printf("\r%s✓%s Stored %d knowledge chunks (features/USPs)                    \n", colorGreen, colorReset, chunkCount)
 	return nil
 }
 
@@ -547,8 +607,26 @@ func (kb *KnowledgeBase) runQueryWithRouter(ctx context.Context, query string) {
 	// Show structured facts
 	if len(resp.StructuredFacts) > 0 {
 		fmt.Printf("\n%s📋 Structured Facts:%s\n", colorBold, colorReset)
+		
+		// Determine max display based on query type
+		maxDisplay := 10 // Default limit
+		
+		// Check if this is a color query - show all colors
+		queryLower := strings.ToLower(query)
+		isColorQuery := strings.Contains(queryLower, "color") || strings.Contains(queryLower, "colour") ||
+			strings.Contains(queryLower, "colors") || strings.Contains(queryLower, "colours")
+		
+		// For color queries or multi-keyword queries, show more results
+		if isColorQuery {
+			maxDisplay = 50 // Show many results for color queries to display all color options
+		} else if len(resp.StructuredFacts) > 10 {
+			// For multi-keyword queries, show more results to cover all keywords
+			maxDisplay = 30
+		}
+		
+		displayedCount := 0
 		for i, fact := range resp.StructuredFacts {
-			if i >= 10 {
+			if i >= maxDisplay {
 				break
 			}
 			fmt.Printf("  %s%s%s: %s%s %s%s\n",
@@ -558,6 +636,12 @@ func (kb *KnowledgeBase) runQueryWithRouter(ctx context.Context, query string) {
 			if fact.Unit != "" {
 				fmt.Printf("    %s%s%s\n", colorYellow, fact.Unit, colorReset)
 			}
+			displayedCount++
+		}
+		
+		// Show count if there are more results
+		if len(resp.StructuredFacts) > maxDisplay {
+			fmt.Printf("  ... and %d more fact(s)\n", len(resp.StructuredFacts)-maxDisplay)
 		}
 	}
 

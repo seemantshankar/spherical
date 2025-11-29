@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -13,13 +14,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/cache"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/config"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/embedding"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/ingest"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/monitoring"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/observability"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/retrieval"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/storage"
 )
 
 var (
@@ -409,21 +413,57 @@ Results include citations and lineage information.`,
 				Str("question", question).
 				Msg("Executing query")
 
+			// Open database connection
+			db, err := openDatabase(cfg)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			// Create spec view repository
+			specViewRepo := storage.NewSpecViewRepository(db)
+
+			// Create embedder (use mock for now, can be enhanced to use real embeddings)
+			var embClient embedding.Embedder
+			apiKey := os.Getenv("OPENROUTER_API_KEY")
+			if apiKey != "" {
+				client, err := embedding.NewClient(embedding.Config{
+					APIKey:  apiKey,
+					Model:   cfg.Embedding.Model,
+					BaseURL: "https://openrouter.ai/api/v1",
+				})
+				if err == nil {
+					embClient = client
+				} else {
+					logger.Warn().Err(err).Msg("Failed to create embedding client, using mock")
+					embClient = embedding.NewMockClient(cfg.Embedding.Dimension)
+				}
+			} else {
+				embClient = embedding.NewMockClient(cfg.Embedding.Dimension)
+			}
+
 			// Create retrieval infrastructure
 			memCache := cache.NewMemoryClient(1000)
 			vectorAdapter, err := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{
-				Dimension: 768,
+				Dimension: cfg.Embedding.Dimension,
 			})
 			if err != nil {
 				return fmt.Errorf("create vector adapter: %w", err)
 			}
 
-			router := retrieval.NewRouter(logger, memCache, vectorAdapter, nil, retrieval.RouterConfig{
-				MaxChunks:                 maxChunks,
-				StructuredFirst:           true,
-				SemanticFallback:          true,
-				IntentConfidenceThreshold: 0.7,
-			})
+			router := retrieval.NewRouter(
+				logger,
+				memCache,
+				vectorAdapter,
+				embClient,
+				specViewRepo,
+				retrieval.RouterConfig{
+					MaxChunks:                 maxChunks,
+					StructuredFirst:           true,
+					SemanticFallback:          true,
+					IntentConfidenceThreshold: 0.7,
+				},
+			)
 
 			// Build request
 			req := retrieval.RetrievalRequest{
@@ -868,14 +908,44 @@ Use --down to rollback migrations.`,
 					Msg("Rolling back migrations")
 				// TODO: Implement migration rollback
 				fmt.Printf("✓ Rolled back to version %d on %s\n", version, target)
-			} else {
-				logger.Info().
-					Str("target", target).
-					Msg("Running migrations")
-				// TODO: Implement migrations
-				fmt.Printf("✓ Migrations applied on %s\n", target)
+				return nil
 			}
 
+			// Open database connection
+			db, err := openDatabase(cfg)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			// Determine migration file
+			var migrationFile string
+			if target == "sqlite" {
+				migrationFile = "db/migrations/0001_init_sqlite.sql"
+			} else {
+				migrationFile = "db/migrations/0001_init.sql"
+			}
+
+			// Read migration file (relative to knowledge-engine directory)
+			migrationPath := migrationFile
+
+			logger.Info().
+				Str("target", target).
+				Str("file", migrationPath).
+				Msg("Running migrations")
+
+			migrationSQL, err := os.ReadFile(migrationPath)
+			if err != nil {
+				return fmt.Errorf("read migration file: %w", err)
+			}
+
+			// Execute migration
+			_, err = db.Exec(string(migrationSQL))
+			if err != nil {
+				return fmt.Errorf("execute migration: %w", err)
+			}
+
+			fmt.Printf("✓ Migrations applied on %s\n", target)
 			return nil
 		},
 	}
@@ -921,4 +991,33 @@ func resolveID(idOrName string) (uuid.UUID, error) {
 	// If not a UUID, generate a deterministic UUID from name (for dev/testing)
 	// In production, this would query the database by name
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idOrName)), nil
+}
+
+// openDatabase opens a database connection based on the configuration.
+func openDatabase(cfg *config.Config) (*sql.DB, error) {
+	dsn := cfg.DatabaseDSN()
+	
+	var driver string
+	if cfg.Database.Driver == "sqlite" {
+		driver = "sqlite3"
+	} else if cfg.Database.Driver == "postgres" {
+		driver = "postgres"
+		// Import postgres driver if needed
+		// _ "github.com/lib/pq"
+		return nil, fmt.Errorf("postgres driver not yet implemented in CLI")
+	} else {
+		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
+	}
+
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// Set connection pool settings for SQLite
+	if cfg.Database.Driver == "sqlite" {
+		db.SetMaxOpenConns(cfg.Database.SQLite.MaxOpenConns)
+	}
+
+	return db, nil
 }

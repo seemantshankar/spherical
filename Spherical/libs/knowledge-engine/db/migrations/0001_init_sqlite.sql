@@ -324,3 +324,36 @@ CREATE TRIGGER IF NOT EXISTS trg_kc_updated
     FOR EACH ROW 
     BEGIN UPDATE knowledge_chunks SET updated_at = datetime('now') WHERE id = NEW.id; END;
 
+-- ============================================================================
+-- VIEWS
+-- ============================================================================
+
+-- spec_view_latest: A view that provides the latest active spec values
+-- SQLite doesn't support materialized views, so this is a regular view
+CREATE VIEW IF NOT EXISTS spec_view_latest AS
+SELECT 
+    sv.id,
+    sv.tenant_id,
+    sv.product_id,
+    sv.campaign_variant_id,
+    sv.spec_item_id,
+    si.display_name AS spec_name,
+    sc.name AS category_name,
+    COALESCE(sv.value_text, CAST(sv.value_numeric AS TEXT)) AS value,
+    sv.unit,
+    sv.confidence,
+    sv.source_doc_id,
+    sv.source_page,
+    sv.version,
+    cv.locale,
+    cv.trim,
+    cv.market,
+    p.name AS product_name
+FROM spec_values sv
+JOIN spec_items si ON sv.spec_item_id = si.id
+JOIN spec_categories sc ON si.category_id = sc.id
+JOIN campaign_variants cv ON sv.campaign_variant_id = cv.id
+JOIN products p ON sv.product_id = p.id
+WHERE sv.status = 'active'
+  AND cv.status = 'published';
+

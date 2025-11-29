@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -540,20 +541,38 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 
 	// Rank facts by relevance to query keywords
 	facts = r.rankFactsByRelevance(facts, keywords, req.Question)
+	r.logger.Debug().Int("facts_after_ranking", len(facts)).Msg("Facts after ranking")
 
 	// Filter out low-relevance facts
 	facts = r.filterLowRelevanceFacts(facts, keywords)
+	r.logger.Debug().Int("facts_after_filtering", len(facts)).Msg("Facts after filtering")
 
 	// Limit to top results to avoid noise, but keep more for color searches or multi-keyword queries
 	maxResults := 30 // Increased default to handle multi-keyword queries better
 	queryLower := strings.ToLower(req.Question)
+	
 	// Check for color-related queries (handle both singular/plural and US/UK spelling)
-	if strings.Contains(queryLower, "color") || strings.Contains(queryLower, "colour") || 
-	   strings.Contains(queryLower, "colors") || strings.Contains(queryLower, "colours") {
+	// Also check for queries that might be asking about colors (body colors, exterior colors, etc.)
+	hasColorKeyword := false
+	for _, kw := range keywords {
+		kwLower := strings.ToLower(kw)
+		if kwLower == "color" || kwLower == "colors" || kwLower == "colour" || kwLower == "colours" {
+			hasColorKeyword = true
+			break
+		}
+	}
+	isColorQuery := hasColorKeyword || strings.Contains(queryLower, "color") || strings.Contains(queryLower, "colour") || 
+	   strings.Contains(queryLower, "colors") || strings.Contains(queryLower, "colours") ||
+	   strings.Contains(queryLower, "body color") || strings.Contains(queryLower, "body colour") ||
+	   strings.Contains(queryLower, "exterior color") || strings.Contains(queryLower, "exterior colour")
+	
+	if isColorQuery {
 		maxResults = 100 // Allow many results for color queries to get all color options
 	}
+	
 	// Multi-keyword queries - limit results more aggressively for focused queries
-	if len(keywords) >= 2 {
+	// BUT: Don't limit color queries - they need to return all available colors
+	if len(keywords) >= 2 && !isColorQuery {
 		// For focused 2-keyword queries (like "child seat"), limit to top 5
 		if len(keywords) == 2 {
 			maxResults = 5 // Focused queries - only top 5 most relevant
@@ -561,6 +580,12 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 			maxResults = 60 // Multi-keyword queries like "weight wheels colors length" need more results
 		}
 	}
+	r.logger.Debug().
+		Int("facts_before_limit", len(facts)).
+		Int("max_results", maxResults).
+		Bool("is_color_query", isColorQuery).
+		Int("keyword_count", len(keywords)).
+		Msg("Applying maxResults limit")
 	if len(facts) > maxResults {
 		facts = facts[:maxResults]
 	}
@@ -916,8 +941,14 @@ func (c *IntentClassifier) Classify(question string) (Intent, float64) {
 	}
 
 	// Check USP patterns next (before spec to catch "special", "unique", etc.)
+	// Use word boundaries to avoid false matches (e.g., "suspension" matching "usp")
 	for _, pattern := range c.uspPatterns {
-		if strings.Contains(q, pattern) {
+		// Match whole words only to avoid substring matches
+		patternLower := strings.ToLower(pattern)
+		// Check if pattern appears as a whole word (with word boundaries)
+		wordBoundaryPattern := "\\b" + regexp.QuoteMeta(patternLower) + "\\b"
+		matched, _ := regexp.MatchString(wordBoundaryPattern, q)
+		if matched {
 			return IntentUSPLookup, 0.85
 		}
 	}
@@ -1287,14 +1318,73 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 				}
 			} else {
 				// Single word keywords
+				matched := false
 				if strings.Contains(nameLower, kwLower) {
 					score += 2.0
 					matchesInName++
+					matched = true
 				} else if strings.Contains(categoryLower, kwLower) {
 					score += 1.5
 					matchesInCategory++
+					matched = true
 				} else if strings.Contains(valueLower, kwLower) {
 					score += 0.5
+					matched = true
+				}
+				
+				// Also check for variants if no exact match (for facts found via variant search)
+				if !matched {
+					// Special handling for color/colour keywords
+					if kwLower == "colors" || kwLower == "colours" {
+						// Try singular variant
+						if strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") {
+							score += 2.0
+							matchesInName++
+						} else if strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colour") {
+							score += 1.5
+							matchesInCategory++
+						} else if strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colour") {
+							score += 0.5
+						}
+					} else if kwLower == "color" || kwLower == "colour" {
+						// Try plural variant
+						if strings.Contains(nameLower, "colors") || strings.Contains(nameLower, "colours") {
+							score += 2.0
+							matchesInName++
+						} else if strings.Contains(categoryLower, "colors") || strings.Contains(categoryLower, "colours") {
+							score += 1.5
+							matchesInCategory++
+						} else if strings.Contains(valueLower, "colors") || strings.Contains(valueLower, "colours") {
+							score += 0.5
+						}
+					} else {
+						// For other keywords, try singular/plural variants
+						if strings.HasSuffix(kwLower, "s") && len(kwLower) > 1 {
+							// Try singular variant (if keyword is plural)
+							singular := kwLower[:len(kwLower)-1]
+							if strings.Contains(nameLower, singular) {
+								score += 1.5 // Slightly lower score for variant match
+								matchesInName++
+							} else if strings.Contains(categoryLower, singular) {
+								score += 1.0
+								matchesInCategory++
+							} else if strings.Contains(valueLower, singular) {
+								score += 0.3
+							}
+						} else {
+							// Try plural variant (if keyword is singular)
+							plural := kwLower + "s"
+							if strings.Contains(nameLower, plural) {
+								score += 1.5 // Slightly lower score for variant match
+								matchesInName++
+							} else if strings.Contains(categoryLower, plural) {
+								score += 1.0
+								matchesInCategory++
+							} else if strings.Contains(valueLower, plural) {
+								score += 0.3
+							}
+						}
+					}
 				}
 			}
 		}
@@ -1302,6 +1392,12 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 		// Bonus for multiple keyword matches
 		if matchesInName >= 2 || (matchesInCategory > 0 && matchesInName > 0) {
 			score += 2.0
+		}
+		
+		// For multi-keyword queries, give bonus if fact matches a keyword even if not all keywords match
+		// This ensures facts matching individual keywords are included
+		if len(keywords) >= 3 && (matchesInName > 0 || matchesInCategory > 0) {
+			score += 1.0 // Bonus for matching at least one keyword in multi-keyword queries
 		}
 		
 		scored[i] = scoredFact{fact: fact, score: score}
@@ -1317,69 +1413,225 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 		}
 	}
 	
-		if len(nonPhraseKeywords) >= 2 {
-			// For multi-keyword queries, require facts that match at least 2 keywords
-			minScore = 3.0 // Higher threshold - must match multiple keywords
+	if len(nonPhraseKeywords) >= 2 {
+			// For multi-keyword queries, adjust threshold based on number of keywords
+			// More keywords = more permissive (user wants to see facts for each keyword)
+			if len(nonPhraseKeywords) >= 4 {
+				minScore = 0.5 // Very permissive for 4+ keywords - match any keyword
+			} else if len(nonPhraseKeywords) == 3 {
+				minScore = 1.0 // Moderate for 3 keywords
+			} else {
+				minScore = 3.0 // Strict for 2 keywords - must match both
+			}
 			
-			// Check each fact to ensure it matches multiple keywords
-			// Must check ALL fields (category, name, value) to find keyword matches
-			tempScored := make([]scoredFact, 0, len(scored))
-			for _, s := range scored {
-				fact := s.fact
-				categoryLower := strings.ToLower(fact.Category)
-				nameLower := strings.ToLower(fact.Name)
-				valueLower := strings.ToLower(fact.Value)
-				
-				keywordMatches := 0
-				for _, kw := range nonPhraseKeywords {
-					kwLower := strings.ToLower(kw)
-					// Check ALL fields (category, name, value) for keyword matches
-					if strings.Contains(categoryLower, kwLower) || 
-					   strings.Contains(nameLower, kwLower) || 
-					   strings.Contains(valueLower, kwLower) {
-						keywordMatches++
-					}
-				}
-				
-				// Only include facts that match ALL keywords for 2-keyword queries
-				// For 2-keyword queries, require both keywords to match
-				if len(nonPhraseKeywords) == 2 {
-					if keywordMatches == 2 {
-						tempScored = append(tempScored, s)
-					}
-				} else if keywordMatches >= 2 {
-					// For 3+ keyword queries, require at least 2 to match
-					tempScored = append(tempScored, s)
+			// Check if this is a color-related query - be more lenient with matching
+			isColorQuery := false
+			for _, kw := range nonPhraseKeywords {
+				kwLower := strings.ToLower(kw)
+				if kwLower == "color" || kwLower == "colors" || kwLower == "colour" || kwLower == "colours" {
+					isColorQuery = true
+					break
 				}
 			}
 			
-			// Use filtered results (facts that match all keywords)
-			// This ensures we only return facts that are truly relevant
+		// Check each fact to ensure it matches keywords
+		// Phrase keywords (quoted) and non-phrase keywords are treated separately
+		// A fact can match EITHER a phrase keyword OR a non-phrase keyword
+		tempScored := make([]scoredFact, 0, len(scored))
+		
+		// Extract phrase keywords separately
+		phraseKeywords := []string{}
+		for _, kw := range keywords {
+			if strings.Contains(kw, " ") {
+				phraseKeywords = append(phraseKeywords, kw)
+			}
+		}
+		
+		for _, s := range scored {
+			fact := s.fact
+			categoryLower := strings.ToLower(fact.Category)
+			nameLower := strings.ToLower(fact.Name)
+			valueLower := strings.ToLower(fact.Value)
+			combinedText := categoryLower + " " + nameLower + " " + valueLower
+			
+			// Check if fact matches any phrase keyword (quoted phrases)
+			// Phrase keywords require the full phrase to appear together
+			matchesPhrase := false
+			for _, phraseKw := range phraseKeywords {
+				phraseLower := strings.ToLower(phraseKw)
+				if strings.Contains(combinedText, phraseLower) {
+					matchesPhrase = true
+					break
+				}
+			}
+			
+			// Check if fact matches non-phrase keywords
+			// Also check for singular/plural variants (e.g., "speaker" matches "speakers", "color" matches "colors")
+			keywordMatches := 0
+			hasColorKeyword := false
+			for _, kw := range nonPhraseKeywords {
+				kwLower := strings.ToLower(kw)
+				// Check ALL fields (category, name, value) for keyword matches
+				matches := strings.Contains(categoryLower, kwLower) || 
+				   strings.Contains(nameLower, kwLower) || 
+				   strings.Contains(valueLower, kwLower)
+				
+				// Also check for singular/plural variants (facts found via variant search)
+				// Special handling for color/colour keywords first
+				if !matches {
+					if kwLower == "colors" || kwLower == "colours" {
+						// Try singular variant for color keywords
+						matches = strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colour") ||
+						   strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") ||
+						   strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colour")
+					} else if kwLower == "color" || kwLower == "colour" {
+						// Try plural variant for color keywords
+						matches = strings.Contains(categoryLower, "colors") || strings.Contains(categoryLower, "colours") ||
+						   strings.Contains(nameLower, "colors") || strings.Contains(nameLower, "colours") ||
+						   strings.Contains(valueLower, "colors") || strings.Contains(valueLower, "colours")
+					}
+					// Also check cross-spelling variants (US vs UK)
+					if !matches {
+						if kwLower == "colors" || kwLower == "color" {
+							matches = strings.Contains(categoryLower, "colour") || strings.Contains(categoryLower, "colours") ||
+							   strings.Contains(nameLower, "colour") || strings.Contains(nameLower, "colours") ||
+							   strings.Contains(valueLower, "colour") || strings.Contains(valueLower, "colours")
+						} else if kwLower == "colours" || kwLower == "colour" {
+							matches = strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colors") ||
+							   strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colors") ||
+							   strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colors")
+						}
+					}
+					// For other keywords, try singular/plural variants
+					if !matches && kwLower != "color" && kwLower != "colors" && kwLower != "colour" && kwLower != "colours" {
+						// Try singular variant (if keyword is plural like "speakers")
+						if strings.HasSuffix(kwLower, "s") && len(kwLower) > 1 {
+							singular := kwLower[:len(kwLower)-1]
+							matches = strings.Contains(categoryLower, singular) || 
+							   strings.Contains(nameLower, singular) || 
+							   strings.Contains(valueLower, singular)
+						} else {
+							// Try plural variant (if keyword is singular like "speaker")
+							plural := kwLower + "s"
+							matches = strings.Contains(categoryLower, plural) || 
+							   strings.Contains(nameLower, plural) || 
+							   strings.Contains(valueLower, plural)
+						}
+					}
+				}
+				
+				if matches {
+					keywordMatches++
+				}
+				// Track if this keyword is color-related
+				if kwLower == "color" || kwLower == "colors" || kwLower == "colour" || kwLower == "colours" {
+					hasColorKeyword = true
+				}
+			}
+			
+			// Include fact if it matches a phrase keyword OR matches non-phrase keywords
+			shouldInclude := false
+			
+			// If it matches a phrase keyword, include it
+			if matchesPhrase {
+				shouldInclude = true
+			}
+			
+			// Also check non-phrase keyword matching
+			// For color queries, if the fact is about colors and matches the color keyword, include it
+			if isColorQuery && hasColorKeyword {
+				if strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colour") ||
+				   strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") {
+					shouldInclude = true
+				}
+			}
+			
+			// For queries with many keywords (4+), be more permissive - return facts matching ANY keyword
+			// This allows users to get all relevant facts for each keyword they asked about
+			if len(nonPhraseKeywords) >= 4 {
+				// For 4+ keywords, include facts that match at least 1 keyword
+				// This allows queries like "upholstery length weight suspension" to return all relevant facts
+				if keywordMatches >= 1 {
+					shouldInclude = true
+				}
+			} else if len(nonPhraseKeywords) == 3 {
+				// For 3 keywords, require at least 1 match (more permissive than before)
+				// This handles queries like "fuel efficiency power" better
+				if keywordMatches >= 1 {
+					shouldInclude = true
+				}
+			} else if len(nonPhraseKeywords) == 2 {
+				// For 2 keywords, require both to match (focused queries)
+				if keywordMatches == 2 {
+					shouldInclude = true
+				}
+			} else if len(nonPhraseKeywords) == 1 {
+				// For single keyword, include if it matches
+				if keywordMatches >= 1 {
+					shouldInclude = true
+				}
+			}
+			
+			if shouldInclude {
+				tempScored = append(tempScored, s)
+			}
+		}
+			
+			// Use filtered results
+			// For 4+ keywords: facts matching at least 1 keyword
+			// For 3 keywords: facts matching at least 1 keyword  
+			// For 2 keywords: facts matching both keywords
 			if len(tempScored) > 0 {
 				scored = tempScored
+				var matchDesc string
+				if len(nonPhraseKeywords) >= 4 {
+					matchDesc = "matching at least 1 keyword"
+				} else if len(nonPhraseKeywords) == 3 {
+					matchDesc = "matching at least 1 keyword"
+				} else {
+					matchDesc = "matching all keywords"
+				}
 				r.logger.Debug().
 					Int("filtered_facts", len(tempScored)).
 					Int("total_facts", len(scored)).
 					Strs("keywords", nonPhraseKeywords).
-					Msg("Filtered to facts matching all keywords")
+					Msg(fmt.Sprintf("Filtered to facts %s", matchDesc))
 			} else {
-				// If no facts match all keywords, it means the query might be too specific
+				// If no facts match keywords, it means the query might be too specific
 				// In this case, don't return irrelevant results - return empty or very few
+				var matchDesc string
+				if len(nonPhraseKeywords) >= 4 {
+					matchDesc = "at least 1 keyword"
+				} else if len(nonPhraseKeywords) == 3 {
+					matchDesc = "at least 1 keyword"
+				} else {
+					matchDesc = "all keywords"
+				}
 				r.logger.Debug().
 					Int("total_facts", len(scored)).
 					Strs("keywords", nonPhraseKeywords).
-					Msg("No facts matched all keywords - returning empty results")
+					Msg(fmt.Sprintf("No facts matched %s - returning empty results", matchDesc))
 				scored = []scoredFact{} // Return empty - better than irrelevant results
 			}
 		}
 	
 	// Check if we have phrase keywords - require phrase match
+	// But be more lenient for multi-keyword queries where we want to return facts for each keyword
 	for _, kw := range keywords {
 		if strings.Contains(kw, " ") {
-			minScore = 4.0 // Require strong phrase match for phrase queries
+			// For multi-keyword queries with phrase keywords, be more lenient
+			// The phrase keyword matching is already handled in the keyword matching logic above
+			if len(nonPhraseKeywords) >= 4 {
+				minScore = 0.5 // Very lenient for multi-keyword queries
+			} else {
+				minScore = 2.0 // Moderate for queries with phrase + few keywords
+			}
 			break
 		}
 	}
+	
+	// If no phrase keyword, use the minScore already set based on keyword count
+	// For multi-keyword queries (4+), we already set minScore = 0.5, which is lenient
 	
 	filtered := make([]SpecFact, 0)
 	for _, s := range scored {
@@ -1389,8 +1641,22 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 	}
 	
 	// If filtering removed too many results, be more lenient
-	if len(filtered) < len(facts)/3 && len(facts) > 0 {
-		// Lower threshold if too aggressive
+	// This is especially important for multi-keyword queries where we want to return facts for each keyword
+	// For multi-keyword queries (4+ non-phrase keywords), be very lenient to return facts for each keyword
+	if len(nonPhraseKeywords) >= 4 {
+		// For 4+ keywords, accept any fact that matches at least one keyword (already filtered above)
+		// Just ensure we don't filter by score too aggressively
+		if len(filtered) < len(scored)/2 && len(scored) > 0 {
+			minScore = 0.0 // Accept all facts that passed keyword matching
+			filtered = make([]SpecFact, 0)
+			for _, s := range scored {
+				if s.score >= minScore {
+					filtered = append(filtered, s.fact)
+				}
+			}
+		}
+	} else if len(filtered) < len(scored)/2 && len(scored) > 0 {
+		// Lower threshold if too aggressive - be more permissive
 		minScore = 0.5
 		filtered = make([]SpecFact, 0)
 		for _, s := range scored {
@@ -1428,9 +1694,29 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 
 // extractKeywords extracts keywords from a query string.
 func (r *Router) extractKeywords(query string) []string {
-	// Simple keyword extraction - split on whitespace and filter common words
-	words := strings.Fields(strings.ToLower(query))
-	keywords := make([]string, 0, len(words))
+	keywords := make([]string, 0)
+	
+	// First, extract quoted phrases (they should be treated as single phrase keywords)
+	quotedPhrases := regexp.MustCompile(`"([^"]+)"`)
+	matches := quotedPhrases.FindAllStringSubmatch(query, -1)
+	quotedText := make(map[string]bool)
+	
+	// Extract quoted phrases and remove them from the query
+	queryWithoutQuotes := query
+	for _, match := range matches {
+		if len(match) > 1 {
+			phrase := strings.ToLower(strings.TrimSpace(match[1]))
+			if len(phrase) > 0 {
+				keywords = append(keywords, phrase) // Add as phrase keyword
+				quotedText[phrase] = true
+				// Remove the quoted phrase from query (with quotes) to avoid double-processing
+				queryWithoutQuotes = strings.Replace(queryWithoutQuotes, match[0], " ", -1)
+			}
+		}
+	}
+	
+	// Now extract individual words from the remaining query (without quoted phrases)
+	words := strings.Fields(strings.ToLower(queryWithoutQuotes))
 
 	stopWords := map[string]bool{
 		"the": true, "a": true, "an": true, "and": true, "or": true,
@@ -1453,15 +1739,48 @@ func (r *Router) extractKeywords(query string) []string {
 		"feature": true, "features": true, "size": true, "sizes": true,
 	}
 
+	// British to American spelling normalization map
+	spellingMap := map[string]string{
+		"colour":  "color",
+		"colours": "colors",
+		"favour":  "favor",
+		"favours": "favors",
+		"metre":   "meter",
+		"metres":  "meters",
+		"litre":   "liter",
+		"litres":  "liters",
+		"centre":  "center",
+		"centres": "centers",
+	}
+	
+	// Track which words are part of quoted phrases (to avoid adding them as individual keywords)
+	wordsInQuotes := make(map[string]bool)
+	for quoted := range quotedText {
+		quotedWords := strings.Fields(quoted)
+		for _, w := range quotedWords {
+			wordsInQuotes[strings.ToLower(w)] = true
+		}
+	}
+	
 	for _, word := range words {
 		// Remove punctuation
 		word = strings.Trim(word, ".,!?;:()[]{}'\"")
+		wordLower := strings.ToLower(word)
+		// Skip if this word is part of a quoted phrase (already added as phrase keyword)
+		if wordsInQuotes[wordLower] {
+			continue
+		}
 		if len(word) > 1 && !stopWords[word] {
+			// Normalize British to American spelling
+			if americanSpelling, ok := spellingMap[wordLower]; ok {
+				word = americanSpelling
+			}
 			keywords = append(keywords, word)
 		}
 	}
 
 	// Add common multi-word phrases as keywords if they appear in the query
+	// But skip if they're already in quoted phrases (to avoid duplicates)
 	phrasePatterns := []string{
 		"audio system", "sound system", "speaker system",
 		"climate control", "air conditioning", "air conditioner",
@@ -1472,11 +1791,25 @@ func (r *Router) extractKeywords(query string) []string {
 		"cruise control", "lane assist", "parking assist",
 		"child seat", "child safety", "children safety",
 		"rear seat", "front seat", "seat belt", "seatbelt",
+		"body color", "body colors", "body colour", "body colours",
+		"exterior color", "exterior colors", "exterior colour", "exterior colours",
+		"interior color", "interior colors", "interior colour", "interior colours",
+		"color option", "color options", "colour option", "colour options",
+		"paint color", "paint colors", "paint colour", "paint colours",
 	}
 	
 	queryLower := strings.ToLower(query)
 	for _, phrase := range phrasePatterns {
-		if strings.Contains(queryLower, phrase) {
+		// Check if this phrase is already in quoted phrases
+		alreadyQuoted := false
+		for quoted := range quotedText {
+			if strings.Contains(quoted, phrase) || strings.Contains(phrase, quoted) {
+				alreadyQuoted = true
+				break
+			}
+		}
+		// Only add if not already in quotes and appears in query
+		if !alreadyQuoted && strings.Contains(queryLower, phrase) {
 			// Add the phrase as a keyword
 			keywords = append(keywords, phrase)
 		}
