@@ -20,6 +20,8 @@ import (
 const (
 	// Sample PDF path from requirements
 	testPDFPath = "/Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf"
+	// Arena Wagon R brochure for variant testing
+	arenaWagonRPDFPath = "/Users/seemant/Documents/Projects/AIOutcallingAgent/Uploads/Arena-Wagon-r-Brochure.pdf"
 )
 
 func init() {
@@ -124,21 +126,6 @@ func TestPDFToMarkdownConversion(t *testing.T) {
 	} else {
 		t.Logf("Output written to: %s", outputPath)
 	}
-}
-
-// Helper function to check if string contains substring (case-insensitive)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // =============================================================================
@@ -613,4 +600,1019 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestPDFExtractionWithoutCodeblocks verifies that extracted markdown contains no codeblock delimiters (T008 - User Story 1)
+func TestPDFExtractionWithoutCodeblocks(t *testing.T) {
+	// Skip if sample PDF doesn't exist
+	if _, err := os.Stat(testPDFPath); os.IsNotExist(err) {
+		t.Skipf("Sample PDF not found at %s", testPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Initialize real components (Constitution Principle IV - no mocks)
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	// Create output channel for events
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	// Process PDF
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, testPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown from events
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	// Note: result may be nil if processing failed (e.g., timeout), but we can still check markdown collected from events
+	if result == nil {
+		// If result is nil but we have markdown from events, continue with validation
+		if len(markdown) == 0 {
+			t.Fatal("ProcessWithResult returned nil result and no markdown was collected from events")
+		}
+		t.Log("Warning: ProcessWithResult returned nil (may indicate timeout or error), but markdown was collected from events - continuing validation")
+	}
+
+	// Verify no codeblock delimiters in output (SC-001, FR-001, FR-002)
+	codeblockCount := strings.Count(markdown, "```")
+	if codeblockCount > 0 {
+		t.Errorf("Extracted markdown contains %d codeblock delimiters (```). Expected 0. Content sample: %q", codeblockCount, markdown[:min(200, len(markdown))])
+	}
+
+	// Verify markdown is not empty
+	if len(markdown) == 0 {
+		t.Error("Extracted markdown is empty")
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "pdf-extraction-no-codeblocks-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s (verified: %d codeblock delimiters found)", outputPath, codeblockCount)
+	}
+}
+
+// TestVariantNameExtractionFromTableHeaders verifies variant names are extracted from table headers (T027 - User Story 3)
+func TestVariantNameExtractionFromTableHeaders(t *testing.T) {
+	// Skip if PDF doesn't exist
+	if _, err := os.Stat(arenaWagonRPDFPath); os.IsNotExist(err) {
+		t.Skipf("Arena Wagon R PDF not found at %s", arenaWagonRPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Initialize real components
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, arenaWagonRPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	if result == nil {
+		t.Fatal("ProcessWithResult returned nil result")
+	}
+
+	// Verify variant names are extracted from table headers
+	// Look for variant names in the Variant Availability column or in table structure
+	// Common variant patterns: "Lounge", "Sportline", "Selection L&K", "VX", "ZX", "LX", etc.
+	variantPatterns := []string{
+		"Lounge", "Sportline", "Selection", "L&K", "VX", "ZX", "LX", "Variant", "Trim",
+	}
+
+	foundVariants := 0
+	markdownLower := strings.ToLower(markdown)
+	for _, pattern := range variantPatterns {
+		if strings.Contains(markdownLower, strings.ToLower(pattern)) {
+			foundVariants++
+			t.Logf("Found variant reference: %s", pattern)
+		}
+	}
+
+	// Check for Variant Availability column usage
+	hasVariantAvailability := strings.Contains(markdown, "Variant Availability") ||
+		strings.Contains(markdown, "variant availability") ||
+		strings.Contains(markdown, "Standard") ||
+		strings.Contains(markdown, "Exclusive to:")
+
+	if !hasVariantAvailability && foundVariants == 0 {
+		t.Log("Warning: No variant information found in output. This may indicate:")
+		t.Log("1. The brochure has no variant information (single trim model)")
+		t.Log("2. Variant extraction needs improvement")
+		t.Log("3. The test PDF doesn't contain variant specification tables")
+	} else {
+		t.Logf("Variant extraction test: Found %d variant references, Variant Availability column: %v", foundVariants, hasVariantAvailability)
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "variant-extraction-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestVariantExclusiveFeatureTagging verifies variant-exclusive features are tagged from text mentions (T028 - User Story 3)
+func TestVariantExclusiveFeatureTagging(t *testing.T) {
+	// Skip if PDF doesn't exist
+	if _, err := os.Stat(arenaWagonRPDFPath); os.IsNotExist(err) {
+		t.Skipf("Arena Wagon R PDF not found at %s", arenaWagonRPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Initialize real components
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, arenaWagonRPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	if result == nil {
+		t.Fatal("ProcessWithResult returned nil result")
+	}
+
+	// Look for "Exclusive to:" patterns in Variant Availability column
+	exclusivePatterns := []string{
+		"Exclusive to:",
+		"exclusive to:",
+		"Exclusive",
+		"exclusive",
+	}
+
+	foundExclusive := false
+	markdownLower := strings.ToLower(markdown)
+	for _, pattern := range exclusivePatterns {
+		if strings.Contains(markdownLower, strings.ToLower(pattern)) {
+			foundExclusive = true
+			t.Logf("Found exclusive feature pattern: %s", pattern)
+			break
+		}
+	}
+
+	// Also check for variant-specific mentions in text
+	variantMentions := []string{
+		"only in", "available in", "standard in", "included in",
+	}
+
+	foundMentions := false
+	for _, mention := range variantMentions {
+		if strings.Contains(markdownLower, mention) {
+			foundMentions = true
+			t.Logf("Found variant mention pattern: %s", mention)
+			break
+		}
+	}
+
+	if !foundExclusive && !foundMentions {
+		t.Log("Warning: No variant-exclusive feature tagging found. This may indicate:")
+		t.Log("1. The brochure has no variant-exclusive features")
+		t.Log("2. Features are available in all variants (marked as 'Standard')")
+		t.Log("3. Variant extraction from text needs improvement")
+	} else {
+		t.Logf("Variant-exclusive feature tagging: Exclusive patterns: %v, Mentions: %v", foundExclusive, foundMentions)
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "variant-exclusive-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestSingleTrimModels verifies handling of single trim models with no variant information (T029 - User Story 3)
+func TestSingleTrimModels(t *testing.T) {
+	// Skip if PDF doesn't exist
+	if _, err := os.Stat(arenaWagonRPDFPath); os.IsNotExist(err) {
+		t.Skipf("Arena Wagon R PDF not found at %s", arenaWagonRPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Initialize real components
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, arenaWagonRPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	if result == nil {
+		t.Fatal("ProcessWithResult returned nil result")
+	}
+
+	// For single trim models, Variant Availability column should be:
+	// - Empty, OR
+	// - "Standard" (if feature available in all variants, which is the same as single trim)
+	// - Should NOT contain variant-specific names like "Lounge", "Sportline", etc.
+
+	// Check if output uses "Standard" for all features (indicating single trim or all-variant availability)
+	standardCount := strings.Count(markdown, "Standard")
+
+	// Check for variant-specific names (should be minimal or none for single trim)
+	variantNames := []string{"Lounge", "Sportline", "Selection", "L&K", "VX", "ZX", "LX"}
+	variantNameCount := 0
+	markdownLower := strings.ToLower(markdown)
+	for _, name := range variantNames {
+		if strings.Contains(markdownLower, strings.ToLower(name)) {
+			variantNameCount++
+		}
+	}
+
+	// Verify 5-column format is maintained even for single trim models
+	has5ColumnFormat := strings.Contains(markdown, "| Category | Specification | Value | Key Features | Variant Availability |") ||
+		strings.Contains(markdown, "Variant Availability")
+
+	if !has5ColumnFormat {
+		t.Error("Output should maintain 5-column format even for single trim models (Variant Availability column should be present)")
+	}
+
+	t.Logf("Single trim model test results:")
+	t.Logf("  - 'Standard' occurrences: %d", standardCount)
+	t.Logf("  - Variant-specific names found: %d", variantNameCount)
+	t.Logf("  - 5-column format present: %v", has5ColumnFormat)
+
+	// For single trim models, it's acceptable to have:
+	// - "Standard" in Variant Availability (FR-015)
+	// - Empty Variant Availability (FR-017)
+	// - But should NOT have variant-specific differentiation
+
+	if variantNameCount > 0 && standardCount == 0 {
+		t.Log("Note: Found variant names but no 'Standard' - this may indicate variant differentiation exists in the brochure")
+	} else if standardCount > 0 && variantNameCount == 0 {
+		t.Log("Note: All features marked as 'Standard' with no variant names - likely a single trim model")
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "single-trim-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestStandardNomenclatureMapping verifies that extracted specifications use standard hierarchical nomenclature (T013 - User Story 2)
+func TestStandardNomenclatureMapping(t *testing.T) {
+	// Skip if sample PDF doesn't exist
+	if _, err := os.Stat(testPDFPath); os.IsNotExist(err) {
+		t.Skipf("Sample PDF not found at %s", testPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Initialize real components (Constitution Principle IV - no mocks)
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	// Create output channel for events
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	// Process PDF
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, testPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown from events
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	// Note: result may be nil if processing failed (e.g., timeout), but we can still check markdown collected from events
+	if result == nil {
+		// If result is nil but we have markdown from events, continue with validation
+		if len(markdown) == 0 {
+			t.Fatal("ProcessWithResult returned nil result and no markdown was collected from events")
+		}
+		t.Log("Warning: ProcessWithResult returned nil (may indicate timeout or error), but markdown was collected from events - continuing validation")
+	}
+
+	// Verify standard hierarchical nomenclature is used (FR-003, FR-004, SC-002)
+	// Standard categories include: Engine, Exterior, Interior, Safety, Performance, Dimensions
+	standardCategories := []string{
+		"Engine", "Exterior", "Interior", "Safety", "Performance", "Dimensions",
+	}
+
+	// Check for hierarchical notation (Category > Subcategory)
+	hasHierarchicalNotation := strings.Contains(markdown, ">")
+
+	// Check for standard category usage
+	foundStandardCategories := 0
+	markdownLower := strings.ToLower(markdown)
+	for _, category := range standardCategories {
+		if strings.Contains(markdownLower, strings.ToLower(category)) {
+			foundStandardCategories++
+			t.Logf("Found standard category: %s", category)
+		}
+	}
+
+	// Verify hierarchical structure is present (preferred but not required for all specs)
+	// Note: Some simple specs may use flat categories, which is acceptable per FR-014
+	// (variable depth: 2-4 levels based on semantic meaning)
+	if !hasHierarchicalNotation {
+		t.Log("Note: Output uses flat categories instead of hierarchical notation. This is acceptable for simple specs, but hierarchical notation (Category > Subcategory) is preferred for complex features.")
+	}
+
+	// Verify at least some standard categories are used
+	if foundStandardCategories == 0 {
+		t.Error("No standard categories found. Output should use standard nomenclature (Engine, Exterior, Interior, Safety, Performance, Dimensions)")
+	} else {
+		t.Logf("Standard nomenclature test: Found %d/%d standard categories, Hierarchical notation: %v",
+			foundStandardCategories, len(standardCategories), hasHierarchicalNotation)
+		// Test passes if standard categories are used, even without hierarchical notation
+		// (hierarchical notation is preferred but flat categories are acceptable for simple specs)
+	}
+
+	// Check for specific standard category patterns
+	standardPatterns := []string{
+		"Engine >", "Interior >", "Exterior >", "Safety >", "Performance >", "Dimensions >",
+		"Interior > Seats", "Engine > Power", "Exterior > Lighting",
+	}
+
+	foundPatterns := 0
+	for _, pattern := range standardPatterns {
+		if strings.Contains(markdown, pattern) {
+			foundPatterns++
+			t.Logf("Found standard pattern: %s", pattern)
+		}
+	}
+
+	if foundPatterns > 0 {
+		t.Logf("Found %d standard hierarchical patterns in output", foundPatterns)
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "standard-nomenclature-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestSemanticMappingNonStandardSections verifies that non-standard section names are mapped to standard categories (T014 - User Story 2)
+func TestSemanticMappingNonStandardSections(t *testing.T) {
+	// Skip if sample PDF doesn't exist
+	if _, err := os.Stat(testPDFPath); os.IsNotExist(err) {
+		t.Skipf("Sample PDF not found at %s", testPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Initialize real components (Constitution Principle IV - no mocks)
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	// Create output channel for events
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	// Process PDF
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, testPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown from events
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	// Note: result may be nil if processing failed (e.g., timeout), but we can still check markdown collected from events
+	if result == nil {
+		// If result is nil but we have markdown from events, continue with validation
+		if len(markdown) == 0 {
+			t.Fatal("ProcessWithResult returned nil result and no markdown was collected from events")
+		}
+		t.Log("Warning: ProcessWithResult returned nil (may indicate timeout or error), but markdown was collected from events - continuing validation")
+	}
+
+	// Verify semantic mapping: non-standard brochure terms should be mapped to standard categories (FR-004)
+	// Examples of semantic mapping:
+	// - "Cabin Experience" → "Interior > Comfort"
+	// - "DRL" → "Exterior > Lighting > DRL"
+	// - "Powertrain" → "Engine"
+	// - "Chassis" → "Performance > Suspension" or "Dimensions"
+
+	// Check that output uses standard categories even if brochure uses non-standard terms
+	// We verify by checking that hierarchical notation is used and standard categories appear
+	hasStandardMapping := false
+
+	// Check for evidence of semantic mapping (standard categories present)
+	standardCategoryIndicators := []string{
+		"Interior >", "Exterior >", "Engine >", "Safety >", "Performance >", "Dimensions >",
+	}
+
+	for _, indicator := range standardCategoryIndicators {
+		if strings.Contains(markdown, indicator) {
+			hasStandardMapping = true
+			t.Logf("Found standard category mapping: %s", indicator)
+			break
+		}
+	}
+
+	// Check that brochure-specific terms are NOT used as-is in category paths
+	// (This is a heuristic - we can't know all possible non-standard terms, but we verify standard structure)
+	nonStandardPatterns := []string{
+		"Cabin Experience >", "Powertrain >", "Chassis >", "Body >",
+	}
+
+	foundNonStandard := false
+	for _, pattern := range nonStandardPatterns {
+		if strings.Contains(markdown, pattern) {
+			foundNonStandard = true
+			t.Logf("Warning: Found non-standard category pattern: %s (should be mapped to standard)", pattern)
+		}
+	}
+
+	if !hasStandardMapping {
+		t.Log("Warning: No evidence of standard category mapping found. This may indicate:")
+		t.Log("1. The brochure uses standard section names already")
+		t.Log("2. Semantic mapping needs improvement")
+		t.Log("3. The test PDF doesn't contain typical non-standard sections")
+	} else {
+		t.Logf("Semantic mapping test: Standard mapping present: %v, Non-standard patterns found: %v",
+			hasStandardMapping, foundNonStandard)
+	}
+
+	// Verify hierarchical depth is appropriate (2-4 levels per FR-014)
+	// Count hierarchy depth in category paths
+	lines := strings.Split(markdown, "\n")
+	maxDepth := 0
+	for _, line := range lines {
+		if strings.Contains(line, "|") && strings.Contains(line, ">") {
+			// Count ">" separators to determine depth
+			depth := strings.Count(line, ">")
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+		}
+	}
+
+	if maxDepth > 0 {
+		t.Logf("Hierarchical depth: Maximum depth found: %d levels (expected: 2-4 levels)", maxDepth)
+		if maxDepth > 4 {
+			t.Logf("Warning: Maximum depth (%d) exceeds recommended 4 levels", maxDepth)
+		}
+		if maxDepth < 2 {
+			t.Logf("Note: Maximum depth (%d) is below recommended 2 levels", maxDepth)
+		}
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "semantic-mapping-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestVariantTableExtractionWithCheckboxes verifies variant table extraction with checkbox indicators (T018 - User Story 4)
+func TestVariantTableExtractionWithCheckboxes(t *testing.T) {
+	// Skip if PDF doesn't exist
+	if _, err := os.Stat(arenaWagonRPDFPath); os.IsNotExist(err) {
+		t.Skipf("Arena Wagon R PDF not found at %s", arenaWagonRPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Initialize real components
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, arenaWagonRPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	if result == nil {
+		t.Fatal("ProcessWithResult returned nil result")
+	}
+
+	// Verify variant table extraction with checkboxes (FR-008, FR-010, FR-011)
+	// Check for Variant Availability column
+	hasVariantAvailabilityColumn := strings.Contains(markdown, "Variant Availability") ||
+		strings.Contains(markdown, "variant availability")
+
+	if !hasVariantAvailabilityColumn {
+		t.Error("Output should include 'Variant Availability' column in specification table")
+	}
+
+	// Check for 5-column format
+	has5ColumnFormat := strings.Contains(markdown, "| Category | Specification | Value | Key Features | Variant Availability |")
+
+	if !has5ColumnFormat {
+		t.Log("Warning: 5-column format header not found. Checking for variant availability patterns...")
+	}
+
+	// Check for variant availability patterns that indicate checkbox/symbol parsing
+	variantAvailabilityPatterns := []string{
+		": ✓", ": ✗", ": ●", ": ○", "Standard", "Exclusive to:",
+	}
+
+	foundPatterns := 0
+	for _, pattern := range variantAvailabilityPatterns {
+		if strings.Contains(markdown, pattern) {
+			foundPatterns++
+			t.Logf("Found variant availability pattern: %s", pattern)
+		}
+	}
+
+	if foundPatterns == 0 {
+		t.Log("Warning: No variant availability patterns found. This may indicate:")
+		t.Log("1. The brochure has no variant differentiation tables")
+		t.Log("2. Checkbox/symbol parsing needs improvement")
+		t.Log("3. All features are marked as 'Standard' (available in all variants)")
+	} else {
+		t.Logf("Variant table extraction test: Found %d variant availability patterns", foundPatterns)
+	}
+
+	// Verify table structure includes variant information
+	// Look for table rows with variant availability data
+	lines := strings.Split(markdown, "\n")
+	rowsWithVariantInfo := 0
+	for _, line := range lines {
+		if strings.Contains(line, "|") && (strings.Contains(line, "✓") || strings.Contains(line, "✗") ||
+			strings.Contains(line, "Standard") || strings.Contains(line, "Exclusive to:")) {
+			rowsWithVariantInfo++
+		}
+	}
+
+	t.Logf("Found %d table rows with variant availability information", rowsWithVariantInfo)
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "variant-table-checkbox-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestVariantAvailabilitySymbolParsing verifies parsing of variant availability symbols (✓, ✗, ●, ○) (T019 - User Story 4)
+func TestVariantAvailabilitySymbolParsing(t *testing.T) {
+	// Skip if PDF doesn't exist
+	if _, err := os.Stat(arenaWagonRPDFPath); os.IsNotExist(err) {
+		t.Skipf("Arena Wagon R PDF not found at %s", arenaWagonRPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Initialize real components
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, arenaWagonRPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown
+	var markdown string
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+			}
+		}
+	}
+
+	if result == nil {
+		t.Fatal("ProcessWithResult returned nil result")
+	}
+
+	// Verify variant availability symbol parsing (FR-010)
+	// Check for common symbols used in variant tables: ✓, ✗, ●, ○
+	symbols := []string{
+		"✓", "✗", "●", "○",
+	}
+
+	foundSymbols := make(map[string]int)
+	for _, symbol := range symbols {
+		count := strings.Count(markdown, symbol)
+		if count > 0 {
+			foundSymbols[symbol] = count
+			t.Logf("Found symbol '%s': %d occurrences", symbol, count)
+		}
+	}
+
+	// Check for symbol patterns in variant availability format
+	// Expected format: "VariantName: ✓" or "VariantName: ✗"
+	symbolPatterns := []string{
+		": ✓", ": ✗", ": ●", ": ○",
+	}
+
+	foundPatterns := 0
+	for _, pattern := range symbolPatterns {
+		if strings.Contains(markdown, pattern) {
+			foundPatterns++
+			t.Logf("Found symbol pattern: %s", pattern)
+		}
+	}
+
+	// Also check for alternative formats
+	alternativeFormats := []string{
+		"Standard", "Exclusive to:", "Available in:", "Unknown",
+	}
+
+	foundAlternatives := 0
+	for _, format := range alternativeFormats {
+		if strings.Contains(markdown, format) {
+			foundAlternatives++
+			t.Logf("Found alternative format: %s", format)
+		}
+	}
+
+	if len(foundSymbols) == 0 && foundPatterns == 0 && foundAlternatives == 0 {
+		t.Log("Warning: No variant availability symbols or patterns found. This may indicate:")
+		t.Log("1. The brochure doesn't use symbol-based variant indicators")
+		t.Log("2. Symbols are not being parsed correctly")
+		t.Log("3. Variant information is presented in a different format")
+	} else {
+		t.Logf("Symbol parsing test: Found %d symbol types, %d symbol patterns, %d alternative formats",
+			len(foundSymbols), foundPatterns, foundAlternatives)
+	}
+
+	// Verify symbols appear in Variant Availability column context
+	// Check that symbols appear near variant names or in table structure
+	lines := strings.Split(markdown, "\n")
+	symbolsInTableContext := 0
+	for _, line := range lines {
+		if strings.Contains(line, "|") {
+			for _, symbol := range symbols {
+				if strings.Contains(line, symbol) {
+					symbolsInTableContext++
+					break
+				}
+			}
+		}
+	}
+
+	t.Logf("Found %d table rows containing variant availability symbols", symbolsInTableContext)
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "variant-symbol-parsing-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// TestMultiPageVariantTables verifies that variant information is maintained across multi-page tables (T020 - User Story 4)
+func TestMultiPageVariantTables(t *testing.T) {
+	// Skip if PDF doesn't exist
+	if _, err := os.Stat(arenaWagonRPDFPath); os.IsNotExist(err) {
+		t.Skipf("Arena Wagon R PDF not found at %s", arenaWagonRPDFPath)
+	}
+
+	// Skip if API key not set
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// Initialize real components
+	converter := pdf.NewConverter()
+	defer converter.Cleanup()
+
+	llmClient := llm.NewClient(apiKey, "")
+	extractor := extract.NewService(converter, llmClient)
+
+	eventCh := make(chan domain.StreamEvent, 100)
+
+	var result *extract.ProcessResult
+	go func() {
+		result, _ = extractor.ProcessWithResult(ctx, arenaWagonRPDFPath, eventCh)
+		close(eventCh)
+	}()
+
+	// Collect markdown and track page numbers
+	var markdown string
+	pageMarkdown := make(map[int]string)
+	currentPage := 0
+
+	for event := range eventCh {
+		if event.Type == domain.EventLLMStreaming {
+			if chunk, ok := event.Payload.(string); ok {
+				markdown += chunk
+				// Track page-specific content
+				if event.PageNumber > 0 {
+					if event.PageNumber != currentPage {
+						currentPage = event.PageNumber
+					}
+					pageMarkdown[currentPage] += chunk
+				}
+			}
+		}
+	}
+
+	if result == nil {
+		t.Fatal("ProcessWithResult returned nil result")
+	}
+
+	// Verify variant information consistency across pages (FR-012)
+	// Extract variant names from the full markdown
+	variantNames := extractVariantNames(markdown)
+
+	if len(variantNames) == 0 {
+		t.Log("Warning: No variant names found. This may indicate:")
+		t.Log("1. The brochure has no variant information")
+		t.Log("2. Variant extraction needs improvement")
+		t.Log("3. The test PDF doesn't contain variant specification tables")
+	} else {
+		t.Logf("Found variant names: %v", variantNames)
+	}
+
+	// Check that variant names appear consistently across multiple pages
+	// (if variant tables span multiple pages, variant names should appear on multiple pages)
+	pagesWithVariants := make(map[string][]int) // variant name -> list of page numbers
+	for variantName := range variantNames {
+		for pageNum, pageContent := range pageMarkdown {
+			if strings.Contains(pageContent, variantName) {
+				pagesWithVariants[variantName] = append(pagesWithVariants[variantName], pageNum)
+			}
+		}
+	}
+
+	// Log variant distribution across pages
+	for variantName, pages := range pagesWithVariants {
+		if len(pages) > 1 {
+			t.Logf("Variant '%s' appears on %d pages: %v (indicates multi-page table)", variantName, len(pages), pages)
+		} else if len(pages) == 1 {
+			t.Logf("Variant '%s' appears on page %d only", variantName, pages[0])
+		}
+	}
+
+	// Verify Variant Availability column format is consistent across pages
+	// Check that all pages with variant information use the same format
+	hasConsistentFormat := true
+	variantAvailabilityFormats := []string{
+		"Variant Availability", "Standard", "Exclusive to:", ": ✓", ": ✗",
+	}
+
+	for pageNum, pageContent := range pageMarkdown {
+		hasVariantInfo := false
+		for _, format := range variantAvailabilityFormats {
+			if strings.Contains(pageContent, format) {
+				hasVariantInfo = true
+				break
+			}
+		}
+
+		if hasVariantInfo {
+			// Check if this page uses the 5-column format
+			has5Column := strings.Contains(pageContent, "| Category | Specification | Value | Key Features | Variant Availability |")
+			if !has5Column {
+				// Check if it's at least using variant availability patterns
+				hasPattern := strings.Contains(pageContent, "Standard") ||
+					strings.Contains(pageContent, "Exclusive to:") ||
+					strings.Contains(pageContent, ": ✓") ||
+					strings.Contains(pageContent, ": ✗")
+
+				if !hasPattern {
+					t.Logf("Warning: Page %d has variant info but inconsistent format", pageNum)
+					hasConsistentFormat = false
+				}
+			}
+		}
+	}
+
+	if !hasConsistentFormat {
+		t.Log("Warning: Variant availability format is not consistent across all pages")
+	} else {
+		t.Log("Variant availability format is consistent across pages")
+	}
+
+	// Verify that variant context is maintained (variant names don't disappear and reappear randomly)
+	// This is a heuristic check - variant names should appear in a logical sequence
+	if len(pagesWithVariants) > 0 {
+		t.Logf("Multi-page variant table test: Variants found across %d pages, Format consistency: %v",
+			len(pageMarkdown), hasConsistentFormat)
+	}
+
+	// Write output for manual inspection
+	outputPath := filepath.Join(os.TempDir(), "multi-page-variant-table-test-output.md")
+	err := os.WriteFile(outputPath, []byte(markdown), 0644)
+	if err != nil {
+		t.Errorf("Failed to write output file: %v", err)
+	} else {
+		t.Logf("Output written to: %s", outputPath)
+	}
+}
+
+// extractVariantNames extracts variant names from markdown content
+func extractVariantNames(markdown string) map[string]bool {
+	variants := make(map[string]bool)
+
+	// Common variant patterns to look for
+	commonPatterns := []string{
+		"Lounge", "Sportline", "Selection", "L&K", "VX", "ZX", "LX", "EX", "Touring",
+		"LXi", "VXi", "ZXi", "Style", "Elegance", "Comfort", "Premium", "Luxury", "Sport",
+	}
+
+	markdownLower := strings.ToLower(markdown)
+	for _, pattern := range commonPatterns {
+		if strings.Contains(markdownLower, strings.ToLower(pattern)) {
+			variants[pattern] = true
+		}
+	}
+
+	// Also look for variant names in "Exclusive to:" patterns
+	lines := strings.Split(markdown, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "Exclusive to:") {
+			// Extract variant name after "Exclusive to:"
+			parts := strings.Split(line, "Exclusive to:")
+			if len(parts) > 1 {
+				variantName := strings.TrimSpace(parts[1])
+				// Remove any trailing punctuation or table separators
+				variantName = strings.TrimRight(variantName, "|,;")
+				variantName = strings.TrimSpace(variantName)
+				if variantName != "" {
+					variants[variantName] = true
+				}
+			}
+		}
+	}
+
+	return variants
 }

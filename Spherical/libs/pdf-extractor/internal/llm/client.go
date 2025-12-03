@@ -170,24 +170,46 @@ func (c *Client) buildRequest(imagePath string) (*Request, error) {
 func buildPrompt() string {
 	return `You are a product specification extraction expert. Analyze this image from a product brochure or datasheet.
 
+CRITICAL OUTPUT FORMAT RULES:
+- NEVER output markdown codeblock delimiters (three backticks) anywhere in your response (FR-001)
+- Output ONLY valid Markdown content directly, without wrapping in codeblocks
+- Your output will be stored in a vector database - codeblock delimiters will break ingestion
+
 Extract and return ONLY the following information in Markdown format:
 
+VARIANT NAME EXTRACTION (CRITICAL - READ FIRST):
+- When you see specification tables with column headers that list variant names, extract those EXACT variant names as they appear
+- Use the variant names EXACTLY as they appear in the table headers - DO NOT translate, rename, or interpret them
+- Variant names can be in many formats across different manufacturers and markets:
+  * Alphanumeric codes: "LXi", "VXi", "ZXi", "ZXi+", "LX", "EX", "EX-L", "Touring", "L", "V", "Z", "ZX"
+  * Descriptive names: "Lounge", "Sportline", "Selection L&K", "Style", "Elegance", "Comfort", "Premium", "Luxury", "Sport"
+  * Combinations: "Selection L&K", "ZXi+", "EX-L", "LXi CNG", "VXi AGS"
+  * With sub-variants: "LXi / LXi CNG", "VXi / VXi AGS / VXi CNG", "Base / Premium / Luxury"
+  * Market-specific: Indian (LXi, VXi, ZXi), European (Lounge, Sportline), American (LX, EX, Touring), etc.
+- If table headers show variants with slashes (e.g., "LXi / LXi CNG"), extract each as separate variant names: "LXi" and "LXi CNG"
+- If table headers show multiple variants (e.g., "VXi / VXi AGS / VXi CNG"), extract all: "VXi", "VXi AGS", "VXi CNG"
+- Look carefully at table structure - variant names are typically in column headers, not row headers
+- If you see a table where columns are labeled with variant/trim names (regardless of format), those ARE the variant names - use them EXACTLY as shown in the brochure
+- DO NOT assume variant naming patterns - extract what you see, even if it's unfamiliar
+
 ## Specifications
-Create a table with ONLY technical product specifications. Use EXACTLY this 4-column format:
-| Category | Specification | Value | Key Features |
-|----------|---------------|-------|--------------|
-| Engine | Type | 1.2L Petrol | 1.2L Petrol Engine with VVT |
-| Engine | Power Output | 90 PS @ 6000 rpm | High power output for spirited driving |
-| Dimensions | Length | 3655 mm | Compact dimensions for easy city parking |
-| Fuel Efficiency | Petrol Variant | 24.43 km/l | Best-in-class fuel efficiency |
-| Display | Touchscreen | 10.25 inch | High-resolution floating display |
+Create a table with ONLY technical product specifications. Use EXACTLY this 5-column format:
+| Category | Specification | Value | Key Features | Variant Availability |
+|----------|---------------|-------|--------------|----------------------|
+| Engine | Type | 1.2L Petrol | 1.2L Petrol Engine with VVT | Standard |
+| Engine > Power Output | Maximum Power | 90 PS @ 6000 rpm | High power output for spirited driving | LX: ✓, EX: ✓, Touring: ✗ |
+| Dimensions > Length | Overall Length | 3655 mm | Compact dimensions for easy city parking | Standard |
+| Interior > Seats > Upholstery | Material | Leather | Premium leather upholstery | Exclusive to: Selection L&K |
+| Interior > Display | Touchscreen | 10.25 inch | High-resolution floating display | Standard |
 
 CRITICAL TABLE RULES:
-- Each row must have EXACTLY 4 columns (Category | Specification | Value | Key Features)
+- Each row must have EXACTLY 5 columns (Category | Specification | Value | Key Features | Variant Availability)
 - The 4th column "Key Features" must contain descriptive text, marketing highlights, or benefits associated with that specific spec
 - If no specific key feature/benefit is mentioned for a spec, leave the 4th column empty (just | |)
-- NEVER create 5-column rows
-- For multiple variants, create separate rows for each variant
+- The 5th column "Variant Availability" must indicate which variants have this feature (see Variant Availability rules below)
+- NEVER create rows with fewer or more than 5 columns
+- When specification tables have variant columns (e.g., columns labeled "LXi", "VXi", "ZXi", "ZXi+"), extract variant names from those column headers and include them in the Variant Availability column
+- For multiple variants, create separate rows for each variant ONLY if the specification value differs between variants; otherwise use the Variant Availability column to indicate which variants have the feature
 - Example: "Maximum Power - Petrol 1.0L" goes in Specification column, "50.4 kW @ 5600 rpm" in Value column
 - Keep tables simple and consistent
 - Empty Category cells should be left empty (just |  |)
@@ -227,10 +249,50 @@ NUMBER FORMATTING RULES (CRITICAL):
 - Example: "335 litres" NOT "335^" or "$335^{\wedge}$"
 - Keep measurements simple: "3655 mm" NOT "$3655$"
 
+STANDARD HIERARCHICAL NOMENCLATURE:
+- Use standard hierarchical category notation with variable depth (2-4 levels) based on semantic meaning
+- Map brochure-specific section names to standard categories using semantic understanding, NOT literal section names
+- Use deeper hierarchies (3-4 levels) for complex features: "Interior > Seats > Upholstery > Material"
+- Use shallower hierarchies (2 levels) for simple features: "Engine > Torque"
+- Standard category examples:
+  * Engine > [Type, Power, Torque, Displacement, Fuel Efficiency]
+  * Exterior > [Design, Dimensions, Lighting, Wheels, Colors]
+  * Interior > Seats > [Upholstery > Material, Adjustment, Heating]
+  * Interior > [Display, Climate Control, Audio]
+  * Safety > [Airbags, Driver Assistance, Braking, Stability]
+  * Performance > [Drive Modes, Transmission, Suspension]
+  * Dimensions > [Length, Width, Height, Wheelbase, Weight]
+- Similar features MUST use consistent depth across different brochures
+- Example: "Cabin Experience" in brochure → map to "Interior > Comfort" (semantic mapping, not literal)
+
+VARIANT EXTRACTION AND AVAILABILITY (User Story 3 & 4 - FR-005, FR-006, FR-007, FR-008, FR-009, FR-010, FR-011, FR-012, FR-015, FR-016, FR-017):
+- CRITICAL: Extract variant names EXACTLY as they appear in table column headers - DO NOT translate, rename, or interpret them
+- Variant names vary widely across manufacturers and markets - extract what you see, regardless of format:
+  * Alphanumeric: "LXi", "VXi", "ZXi", "ZXi+", "LX", "EX", "EX-L", "Touring", "L", "V", "Z", "ZX", "LDi", "VDi", "ZDi"
+  * Descriptive: "Lounge", "Sportline", "Selection L&K", "Style", "Elegance", "Comfort", "Premium", "Luxury", "Sport", "Base", "Deluxe"
+  * Combinations: "Selection L&K", "ZXi+", "EX-L", "LXi CNG", "VXi AGS", "Lounge Plus"
+  * With sub-variants: "LXi / LXi CNG", "VXi / VXi AGS / VXi CNG", "Base / Premium / Luxury"
+- When you see a specification table with multiple columns where column headers are variant names (not "Category", "Specification", "Value"), those ARE the variant names - extract them EXACTLY
+- Extract variant names from table column headers when present - scan the table structure carefully to identify variant columns
+- Extract variant names from text mentions (e.g., "Exclusive to L&K", "Available only in Sportline", "LXi variant", "VXi trim", "Available in ZXi+", "Touring model", "EX-L only")
+- The 5th column "Variant Availability" MUST always be present (may be empty for single-trim models)
+- Parse checkbox/symbol indicators (✓, ✗, ●, ○, etc.) that indicate feature availability per variant
+- Variant Availability format rules:
+  * "Standard" (single word) - when feature is available in ALL variants
+  * "Exclusive to: [VariantName]" - when feature is exclusive to one variant (e.g., "Exclusive to: Selection L&K", "Exclusive to: ZXi+", "Exclusive to: Touring")
+  * "LX: ✓, EX: ✓, Touring: ✗" - when feature differs between variants (use EXACT variant names from brochure table headers, use symbols or text)
+  * "Lounge: ✓, Sportline: ✓, Selection L&K: ✗" - example with descriptive variant names
+  * "LXi / LXi CNG: ✓, VXi: ✓" - when variants have sub-variants, include them (e.g., "LXi / LXi CNG" if that's how it appears)
+  * "Unknown" - when variant boundaries are ambiguous and cannot be clearly identified
+  * Leave empty only for single-trim models with no variant information
+- For multi-page specification tables, maintain variant context across all pages - if you see variant names on one page, use the same names on subsequent pages
+- When variant information is missing (single trim models), leave Variant Availability column empty or use "Standard"
+- IMPORTANT: If specification tables have variant columns (columns with variant/trim names as headers), extract those EXACT column header names and use them in the Variant Availability column throughout the document - regardless of whether they're alphanumeric codes, descriptive names, or any other format
+
 For complex tables:
 - Break down into separate rows if needed
 - For merged cells, create individual rows
-- Maintain consistent 4-column structure throughout
+- Maintain consistent 5-column structure throughout
 - If data has multiple sub-values, combine them in the Value column
 
 ## Key Features
@@ -298,14 +360,15 @@ FORMATTING RULES:
 - Example: After a table, add blank line, then ## Header, then blank line, then content
 
 IMPORTANT:
-- Output ONLY valid Markdown (NO LaTeX, NO math mode)
-- STRICTLY maintain 4-column table format
-- Test your tables: count pipes (|) - each row needs exactly 5 pipes (start, 3 separators, end)
+- Output ONLY valid Markdown (NO LaTeX, NO math mode, NO codeblock delimiters)
+- STRICTLY maintain 5-column table format (Category | Specification | Value | Key Features | Variant Availability)
+- Test your tables: count pipes (|) - each row needs exactly 6 pipes (start, 4 separators, end)
 - Include ALL product specifications found
 - EXCLUDE contact info, disclaimers, and legal text
 - Use plain numbers without $ or ^ formatting
 - Be precise and complete
-- SKIP empty sections entirely`
+- SKIP empty sections entirely
+- REMEMBER: Never use three backticks (markdown codeblock delimiters) in your output`
 }
 
 // parseStream parses the Server-Sent Events stream

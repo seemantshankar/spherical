@@ -68,6 +68,44 @@ func TestParser_Parse_SpecTable(t *testing.T) {
 	assert.True(t, found, "Displacement spec not found")
 }
 
+func TestParser_Parse_SpecTable_5Column(t *testing.T) {
+	// Test 5-column format with Variant Availability (new format from PDF extractor)
+	content := `
+## Specifications
+
+| Category | Specification | Value | Key Features | Variant Availability |
+|----------|---------------|-------|--------------|----------------------|
+| Engine > Type | Engine Type | 1.2L Petrol | High efficiency engine with VVT | Standard |
+| Interior > Seats > Upholstery | Material | Leather | Premium leather upholstery | Exclusive to: Selection L&K |
+| Interior > Seats > Upholstery | Material | Fabric | Standard fabric upholstery | Lounge: ✓, Sportline: ✓, Selection L&K: ✗ |
+| Engine > Power Output | Maximum Power | 90 PS @ 6000 rpm | High power output | Standard |
+`
+
+	parser := NewParser(ParserConfig{ChunkSize: 512, ChunkOverlap: 64})
+	result, err := parser.Parse(content)
+
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(result.SpecValues), 4)
+
+	// Check that variant availability is captured
+	foundLeather := false
+	foundFabric := false
+	for _, spec := range result.SpecValues {
+		if spec.Name == "Material" && spec.Value == "Leather" {
+			foundLeather = true
+			assert.Equal(t, "Exclusive to: Selection L&K", spec.VariantAvailability)
+			assert.Equal(t, "Premium leather upholstery", spec.KeyFeatures)
+		}
+		if spec.Name == "Material" && spec.Value == "Fabric" {
+			foundFabric = true
+			assert.Equal(t, "Lounge: ✓, Sportline: ✓, Selection L&K: ✗", spec.VariantAvailability)
+			assert.Equal(t, "Standard fabric upholstery", spec.KeyFeatures)
+		}
+	}
+	assert.True(t, foundLeather, "Leather upholstery spec not found")
+	assert.True(t, foundFabric, "Fabric upholstery spec not found")
+}
+
 func TestParser_Parse_Features(t *testing.T) {
 	content := `
 ## Features

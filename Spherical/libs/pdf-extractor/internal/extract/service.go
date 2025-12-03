@@ -3,6 +3,7 @@ package extract
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -137,6 +138,10 @@ func (s *Service) ProcessWithResult(ctx context.Context, pdfPath string, eventCh
 			s.emitError(eventCh, fmt.Errorf("page %d: %w", image.PageNumber, err))
 			continue
 		}
+
+		// Remove codeblock delimiters (User Story 1 - T010, FR-002)
+		// This is done after LLM extraction, before deduplication
+		pageMarkdown = cleanCodeblocks(pageMarkdown)
 
 		// Deduplicate markdown (FR-018)
 		cleanMarkdown := deduplicator.DeduplicateMarkdown(pageMarkdown)
@@ -332,4 +337,22 @@ func (s *Service) emitError(eventCh chan<- domain.StreamEvent, err error) {
 		Payload:   err.Error(),
 		Timestamp: time.Now(),
 	})
+}
+
+// cleanCodeblocks removes markdown codeblock delimiters from LLM output (User Story 1 - T009)
+// This function is idempotent (safe to run multiple times) per FR-019
+// Handles edge cases: empty codeblocks, nested codeblocks, codeblocks in table cells per FR-018
+var codeblockPattern = regexp.MustCompile("(?s)```(?:markdown)?\\s*\\n?(.*?)\\n?```")
+
+func cleanCodeblocks(markdown string) string {
+	// Remove all markdown codeblock delimiters, preserve content
+	// The pattern matches:
+	// - ``` or ```markdown (with optional language identifier)
+	// - Optional whitespace and newlines before/after
+	// - Content inside (captured in group 1)
+	// - Closing ```
+	// Use non-greedy matching to handle multiple codeblocks
+	cleaned := codeblockPattern.ReplaceAllString(markdown, "$1")
+	
+	return cleaned
 }

@@ -37,15 +37,17 @@ type BrochureMetadata struct {
 
 // ParsedSpec represents an extracted specification.
 type ParsedSpec struct {
-	Category     string
-	Name         string
-	Value        string
-	Unit         string
-	Numeric      *float64
-	Confidence   float64
-	SourcePage   int
-	SourceLine   int
-	RawText      string
+	Category          string
+	Name              string
+	Value             string
+	Unit              string
+	KeyFeatures       string // 4th column: Key Features
+	VariantAvailability string // 5th column: Variant Availability
+	Numeric           *float64
+	Confidence        float64
+	SourcePage        int
+	SourceLine        int
+	RawText           string
 }
 
 // ParsedFeature represents an extracted feature bullet.
@@ -268,6 +270,8 @@ func (p *Parser) splitByPages(content string) map[int]string {
 func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 	var specs []ParsedSpec
 
+	// Match 5-column tables: | Category | Specification | Value | Key Features | Variant Availability |
+	tableRow5Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
 	// Match 4-column tables: | Category | Specification | Value | Unit |
 	tableRow4Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
 	// Match 3-column tables: | Category | Specification | Value |
@@ -286,32 +290,49 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 			continue
 		}
 
-		var category, name, value, unit string
+		var category, name, value, unit, keyFeatures, variantAvailability string
 
-		// Try 4-column format first
-		matches4 := tableRow4Re.FindStringSubmatch(line)
-		if matches4 != nil && len(matches4) >= 5 {
-			category = strings.TrimSpace(matches4[1])
-			name = strings.TrimSpace(matches4[2])
-			value = strings.TrimSpace(matches4[3])
-			unit = strings.TrimSpace(matches4[4])
+		// Try 5-column format first (new format with Variant Availability)
+		matches5 := tableRow5Re.FindStringSubmatch(line)
+		if matches5 != nil && len(matches5) >= 6 {
+			category = strings.TrimSpace(matches5[1])
+			name = strings.TrimSpace(matches5[2])
+			value = strings.TrimSpace(matches5[3])
+			keyFeatures = strings.TrimSpace(matches5[4])
+			variantAvailability = strings.TrimSpace(matches5[5])
+			unit = "" // Unit extracted from value if numeric
 		} else {
-			// Try 3-column format
-			matches3 := tableRow3Re.FindStringSubmatch(line)
-			if matches3 == nil || len(matches3) < 4 {
-				continue
+			// Try 4-column format (legacy: Category | Specification | Value | Unit)
+			matches4 := tableRow4Re.FindStringSubmatch(line)
+			if matches4 != nil && len(matches4) >= 5 {
+				category = strings.TrimSpace(matches4[1])
+				name = strings.TrimSpace(matches4[2])
+				value = strings.TrimSpace(matches4[3])
+				unit = strings.TrimSpace(matches4[4])
+				keyFeatures = ""
+				variantAvailability = ""
+			} else {
+				// Try 3-column format (legacy: Category | Specification | Value)
+				matches3 := tableRow3Re.FindStringSubmatch(line)
+				if matches3 == nil || len(matches3) < 4 {
+					continue
+				}
+				category = strings.TrimSpace(matches3[1])
+				name = strings.TrimSpace(matches3[2])
+				value = strings.TrimSpace(matches3[3])
+				unit = "" // No unit column in 3-column format
+				keyFeatures = ""
+				variantAvailability = ""
 			}
-			category = strings.TrimSpace(matches3[1])
-			name = strings.TrimSpace(matches3[2])
-			value = strings.TrimSpace(matches3[3])
-			unit = "" // No unit column in 3-column format
 		}
 
-		// Skip header rows
+		// Skip header rows (check for 5-column, 4-column, or 3-column headers)
 		if strings.EqualFold(category, "category") || 
 		   strings.EqualFold(name, "specification") ||
 		   strings.EqualFold(name, "spec") ||
-		   strings.EqualFold(value, "value") {
+		   strings.EqualFold(value, "value") ||
+		   strings.EqualFold(keyFeatures, "key features") ||
+		   strings.EqualFold(variantAvailability, "variant availability") {
 			continue
 		}
 
@@ -330,13 +351,15 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 		}
 
 		spec := ParsedSpec{
-			Category:   currentCategory,
-			Name:       name,
-			Value:      value,
-			Unit:       p.unitNormalizer.Normalize(unit),
-			Confidence: 1.0,
-			SourceLine: lineNum,
-			RawText:    line,
+			Category:           currentCategory,
+			Name:               name,
+			Value:              value,
+			Unit:               p.unitNormalizer.Normalize(unit),
+			KeyFeatures:        keyFeatures,
+			VariantAvailability: variantAvailability,
+			Confidence:         1.0,
+			SourceLine:         lineNum,
+			RawText:            line,
 		}
 
 		// Try to parse numeric value

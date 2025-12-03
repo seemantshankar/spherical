@@ -175,7 +175,7 @@ type CompletePayload struct {
 
 ## Output Format
 
-The extracted specifications are returned as structured Markdown with a YAML frontmatter header containing document categorization metadata:
+The extracted specifications are returned as structured Markdown with a YAML frontmatter header containing document categorization metadata. The specifications table uses a 5-column format that includes variant availability information:
 
 ```markdown
 ---
@@ -191,11 +191,13 @@ model: Camry
 # Page 1
 
 ## Specifications
-| Category | Specification | Value |
-|----------|---------------|-------|
-| Dimensions | Length | 3845 mm |
-| Dimensions | Width | 1695 mm |
-| Engine | Type | 1.2L Petrol |
+| Category | Specification | Value | Key Features | Variant Availability |
+|----------|---------------|-------|--------------|----------------------|
+| Dimensions > Length | Overall Length | 3845 mm | Compact dimensions for easy city parking | Standard |
+| Dimensions > Width | Overall Width | 1695 mm | Optimal width for city driving | Standard |
+| Engine > Type | Engine Type | 1.2L Petrol | High efficiency engine with VVT | Standard |
+| Interior > Seats > Upholstery | Material | Leather | Premium leather upholstery | Exclusive to: Selection L&K |
+| Interior > Seats > Upholstery | Material | Fabric | Standard fabric upholstery | Lounge: ✓, Sportline: ✓, Selection L&K: ✗ |
 
 ## Key Features
 - Dual front airbags

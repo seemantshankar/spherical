@@ -164,3 +164,140 @@ func TestFormatCategorizationHeader_FieldOrder(t *testing.T) {
 	}
 }
 
+// Tests for cleanCodeblocks function (User Story 1 - T005, T006, T007)
+
+func TestCleanCodeblocks_CodeblockWrappedMarkdown(t *testing.T) {
+	// T005: Test cleanCodeblocks with codeblock-wrapped markdown
+	input := "```markdown\n## Specifications\n| Category | Specification | Value |\n|----------|---------------|-------|\n| Engine | Type | 1.2L Petrol |\n```"
+	expected := "## Specifications\n| Category | Specification | Value |\n|----------|---------------|-------|\n| Engine | Type | 1.2L Petrol |"
+	
+	result := cleanCodeblocks(input)
+	if result != expected {
+		t.Errorf("cleanCodeblocks() = %q, want %q", result, expected)
+	}
+	
+	// Verify no codeblock delimiters remain
+	if strings.Contains(result, "```") {
+		t.Errorf("cleanCodeblocks() still contains codeblock delimiters: %q", result)
+	}
+}
+
+func TestCleanCodeblocks_EmptyCodeblocks(t *testing.T) {
+	// T006: Test cleanCodeblocks with empty codeblocks
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty codeblock",
+			input:    "```markdown\n```",
+			expected: "",
+		},
+		{
+			name:     "empty codeblock with whitespace",
+			input:    "```markdown\n\n```",
+			expected: "",
+		},
+		{
+			name:     "empty codeblock no language",
+			input:    "```\n```",
+			expected: "",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := cleanCodeblocks(tt.input)
+			if result != tt.expected {
+				t.Errorf("cleanCodeblocks() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCleanCodeblocks_NestedCodeblocks(t *testing.T) {
+	// T007: Test cleanCodeblocks with nested codeblocks
+	// FR-018: For nested codeblocks, remove outer delimiters, preserve inner content
+	input := "```markdown\n```markdown\n## Specifications\n| Category | Specification | Value |\n```\n```"
+	
+	result := cleanCodeblocks(input)
+	// For nested codeblocks, we remove the outer delimiters first
+	// The result should contain the inner content (which may still have codeblock delimiters)
+	if !strings.Contains(result, "## Specifications") {
+		t.Errorf("cleanCodeblocks() removed inner content: %q", result)
+	}
+	// Verify that at least one layer of codeblocks was removed
+	if strings.Count(result, "```") >= strings.Count(input, "```") {
+		t.Errorf("cleanCodeblocks() did not remove any codeblock delimiters from nested input")
+	}
+}
+
+func TestCleanCodeblocks_CodeblocksInTableCells(t *testing.T) {
+	// T012: Test edge case handling for codeblocks in table cells
+	// FR-018: Remove delimiters, preserve cell content
+	input := "## Specifications\n| Category | Specification | Value | Key Features |\n|----------|---------------|-------|--------------|\n| Engine | Type | ```1.2L Petrol``` | High efficiency |\n| Dimensions | Length | 3655 mm | Compact design |"
+	// The regex should remove ```1.2L Petrol``` and leave "1.2L Petrol"
+	result := cleanCodeblocks(input)
+	
+	// Verify codeblock delimiters removed from table cell
+	if strings.Contains(result, "```") {
+		t.Errorf("cleanCodeblocks() still contains codeblock delimiters in table cell: %q", result)
+	}
+	// Verify content is preserved
+	if !strings.Contains(result, "1.2L Petrol") {
+		t.Errorf("cleanCodeblocks() removed content from table cell: %q", result)
+	}
+	// Verify table structure is preserved
+	if !strings.Contains(result, "| Engine | Type |") {
+		t.Errorf("cleanCodeblocks() broke table structure: %q", result)
+	}
+}
+
+func TestCleanCodeblocks_NoCodeblocks(t *testing.T) {
+	// Test that content without codeblocks is unchanged
+	input := "## Specifications\n| Category | Specification | Value |\n|----------|---------------|-------|\n| Engine | Type | 1.2L Petrol |"
+	expected := input
+	
+	result := cleanCodeblocks(input)
+	if result != expected {
+		t.Errorf("cleanCodeblocks() modified content without codeblocks: got %q, want %q", result, expected)
+	}
+}
+
+func TestCleanCodeblocks_Idempotent(t *testing.T) {
+	// FR-019: Test that cleanCodeblocks is idempotent (safe to run multiple times)
+	input := "```markdown\n## Specifications\n| Category | Specification | Value |\n```"
+	
+	// Run once
+	result1 := cleanCodeblocks(input)
+	
+	// Run again on the result
+	result2 := cleanCodeblocks(result1)
+	
+	if result1 != result2 {
+		t.Errorf("cleanCodeblocks() is not idempotent: first run = %q, second run = %q", result1, result2)
+	}
+}
+
+func TestCleanCodeblocks_MultipleCodeblocks(t *testing.T) {
+	// Test handling multiple codeblocks in the same content
+	input := "```markdown\n## Section 1\n```\nSome text\n```markdown\n## Section 2\n```"
+	result := cleanCodeblocks(input)
+	
+	// Verify both codeblocks are removed
+	if strings.Contains(result, "```") {
+		t.Errorf("cleanCodeblocks() still contains codeblock delimiters: %q", result)
+	}
+	// Verify content is preserved
+	if !strings.Contains(result, "## Section 1") {
+		t.Errorf("cleanCodeblocks() removed Section 1: %q", result)
+	}
+	if !strings.Contains(result, "## Section 2") {
+		t.Errorf("cleanCodeblocks() removed Section 2: %q", result)
+	}
+	if !strings.Contains(result, "Some text") {
+		t.Errorf("cleanCodeblocks() removed text between codeblocks: %q", result)
+	}
+}
+
