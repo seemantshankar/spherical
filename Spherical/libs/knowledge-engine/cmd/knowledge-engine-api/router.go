@@ -129,6 +129,9 @@ func NewRouter(logger *observability.Logger, appCfg *AppConfig, engineCfg *confi
 		KeywordConfidenceThreshold: 0.8,
 		CacheResults:              true,
 		CacheTTL:                  appCfg.CacheTTL,
+		MinAvailabilityConfidence: 0.6,
+		BatchProcessingWorkers:    5,
+		BatchProcessingTimeout:     30 * time.Second,
 	})
 
 	// Create lineage writer
@@ -193,6 +196,7 @@ func NewRouter(logger *observability.Logger, appCfg *AppConfig, engineCfg *confi
 		// Retrieval routes
 		r.Route("/retrieval", func(r chi.Router) {
 			r.Post("/query", retrievalHandler.Query)
+			r.Post("/structured", retrievalHandler.Query) // Same handler, supports both formats
 		})
 
 		// Ingestion routes

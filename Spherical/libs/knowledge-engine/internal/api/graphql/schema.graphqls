@@ -62,6 +62,12 @@ input RetrievalInput {
   filters: RetrievalFilters
   maxChunks: Int
   includeLineage: Boolean
+  # New: Structured spec name list from LLM
+  requestedSpecs: [String!]
+  # New: Request mode (natural language vs structured)
+  requestMode: RequestMode
+  # New: Include natural language summary
+  includeSummary: Boolean
 }
 
 input RetrievalFilters {
@@ -129,6 +135,12 @@ type RetrievalResponse {
   semanticChunks: [SemanticChunk!]!
   comparisons: [ComparisonRow!]!
   lineage: [LineageEvent!]!
+  # New: Per-spec availability status
+  specAvailability: [SpecAvailabilityStatus!]
+  # New: Overall confidence score
+  overallConfidence: Float!
+  # New: Optional natural language summary
+  summary: String
 }
 
 type SpecFact {
@@ -329,5 +341,26 @@ enum AlertStatus {
   OPEN
   ACKNOWLEDGED
   RESOLVED
+}
+
+enum RequestMode {
+  NATURAL_LANGUAGE
+  STRUCTURED
+  HYBRID
+}
+
+enum AvailabilityStatus {
+  FOUND
+  UNAVAILABLE
+  PARTIAL
+}
+
+type SpecAvailabilityStatus {
+  specName: String!
+  status: AvailabilityStatus!
+  confidence: Float!
+  alternativeNames: [String!]
+  matchedSpecs: [SpecFact!]
+  matchedChunks: [SemanticChunk!]
 }
 

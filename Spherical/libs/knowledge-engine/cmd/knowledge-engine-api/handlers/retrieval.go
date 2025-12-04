@@ -40,6 +40,12 @@ type RetrievalRequestDTO struct {
 	Filters             *RetrievalFiltersDTO   `json:"filters,omitempty"`
 	MaxChunks           int                    `json:"maxChunks,omitempty"`
 	IncludeLineage      bool                   `json:"includeLineage,omitempty"`
+	// New: Structured spec name list from LLM
+	RequestedSpecs []string `json:"requestedSpecs,omitempty"`
+	// New: Request mode (natural language vs structured)
+	RequestMode    string `json:"requestMode,omitempty"`
+	// New: Include natural language summary
+	IncludeSummary bool   `json:"includeSummary,omitempty"`
 }
 
 // ConversationMessage represents a conversation turn.
@@ -62,6 +68,22 @@ type RetrievalResponseDTO struct {
 	SemanticChunks  []SemanticChunkDTO `json:"semanticChunks"`
 	Comparisons     []ComparisonDTO  `json:"comparisons,omitempty"`
 	Lineage         []LineageDTO     `json:"lineage,omitempty"`
+	// New: Per-spec availability status
+	SpecAvailability []SpecAvailabilityDTO `json:"specAvailability,omitempty"`
+	// New: Overall confidence score
+	OverallConfidence float64 `json:"overallConfidence"`
+	// New: Optional natural language summary
+	Summary *string `json:"summary,omitempty"`
+}
+
+// SpecAvailabilityDTO represents availability status for a spec.
+type SpecAvailabilityDTO struct {
+	SpecName        string            `json:"specName"`
+	Status          string            `json:"status"`
+	Confidence      float64           `json:"confidence"`
+	AlternativeNames []string         `json:"alternativeNames,omitempty"`
+	MatchedSpecs    []SpecFactDTO     `json:"matchedSpecs,omitempty"`
+	MatchedChunks   []SemanticChunkDTO `json:"matchedChunks,omitempty"`
 }
 
 // SpecFactDTO represents a structured fact.
@@ -124,9 +146,9 @@ func (h *RetrievalHandler) Query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if reqDTO.Question == "" {
-		h.writeError(w, http.StatusBadRequest, "question is required", "")
+	// Validate required fields - either question or requestedSpecs must be provided
+	if reqDTO.Question == "" && len(reqDTO.RequestedSpecs) == 0 {
+		h.writeError(w, http.StatusBadRequest, "either question or requestedSpecs is required", "")
 		return
 	}
 
@@ -178,6 +200,16 @@ func (h *RetrievalHandler) Query(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse request mode
+	var requestMode retrieval.RequestMode
+	if reqDTO.RequestMode != "" {
+		requestMode = retrieval.RequestMode(reqDTO.RequestMode)
+	} else if len(reqDTO.RequestedSpecs) > 0 {
+		requestMode = retrieval.RequestModeStructured
+	} else {
+		requestMode = retrieval.RequestModeNaturalLanguage
+	}
+
 	// Build request
 	req := retrieval.RetrievalRequest{
 		TenantID:          tenantID,
@@ -188,6 +220,8 @@ func (h *RetrievalHandler) Query(w http.ResponseWriter, r *http.Request) {
 		Filters:           filters,
 		MaxChunks:         reqDTO.MaxChunks,
 		IncludeLineage:    reqDTO.IncludeLineage,
+		RequestedSpecs:    reqDTO.RequestedSpecs,
+		RequestMode:       requestMode,
 	}
 
 	// Execute query
@@ -272,6 +306,53 @@ func (h *RetrievalHandler) toResponseDTO(resp *retrieval.RetrievalResponse) Retr
 			DocumentSourceID: docID,
 			OccurredAt:       lineage.OccurredAt.Format("2006-01-02T15:04:05Z07:00"),
 		})
+	}
+
+	// Convert spec availability statuses
+	dto.SpecAvailability = make([]SpecAvailabilityDTO, 0, len(resp.SpecAvailability))
+	for _, status := range resp.SpecAvailability {
+		statusDTO := SpecAvailabilityDTO{
+			SpecName:        status.SpecName,
+			Status:          string(status.Status),
+			Confidence:      status.Confidence,
+			AlternativeNames: status.AlternativeNames,
+		}
+
+		// Convert matched specs
+		statusDTO.MatchedSpecs = make([]SpecFactDTO, 0, len(status.MatchedSpecs))
+		for _, fact := range status.MatchedSpecs {
+			statusDTO.MatchedSpecs = append(statusDTO.MatchedSpecs, SpecFactDTO{
+				SpecItemID:        fact.SpecItemID.String(),
+				Category:          fact.Category,
+				Name:              fact.Name,
+				Value:             fact.Value,
+				Unit:              fact.Unit,
+				Confidence:        fact.Confidence,
+				CampaignVariantID: fact.CampaignVariantID.String(),
+				Source:            h.toSourceDTO(fact.Source),
+			})
+		}
+
+		// Convert matched chunks
+		statusDTO.MatchedChunks = make([]SemanticChunkDTO, 0, len(status.MatchedChunks))
+		for _, chunk := range status.MatchedChunks {
+			statusDTO.MatchedChunks = append(statusDTO.MatchedChunks, SemanticChunkDTO{
+				ChunkID:   chunk.ChunkID.String(),
+				ChunkType: string(chunk.ChunkType),
+				Text:      chunk.Text,
+				Distance:  chunk.Distance,
+				Metadata:  chunk.Metadata,
+				Source:    h.toSourceDTO(chunk.Source),
+			})
+		}
+
+		dto.SpecAvailability = append(dto.SpecAvailability, statusDTO)
+	}
+
+	// Set overall confidence and summary
+	dto.OverallConfidence = resp.OverallConfidence
+	if resp.Summary != nil {
+		dto.Summary = resp.Summary
 	}
 
 	return dto

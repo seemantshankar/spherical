@@ -105,11 +105,16 @@ type EmbeddingConfig struct {
 
 // RetrievalConfig holds retrieval settings.
 type RetrievalConfig struct {
-	MaxChunks                  int     `yaml:"max_chunks"`
-	StructuredFirst            bool    `yaml:"structured_first"`
-	SemanticFallback           bool    `yaml:"semantic_fallback"`
-	IntentConfidenceThreshold  float64 `yaml:"intent_confidence_threshold"`
-	CacheResults               bool    `yaml:"cache_results"`
+	MaxChunks                  int           `yaml:"max_chunks"`
+	StructuredFirst            bool          `yaml:"structured_first"`
+	SemanticFallback           bool          `yaml:"semantic_fallback"`
+	IntentConfidenceThreshold  float64       `yaml:"intent_confidence_threshold"`
+	CacheResults               bool          `yaml:"cache_results"`
+	// New fields for structured requests
+	MinAvailabilityConfidence float64       `yaml:"min_availability_confidence"`
+	BatchProcessingWorkers    int           `yaml:"batch_processing_workers"`
+	BatchProcessingTimeout     time.Duration `yaml:"batch_processing_timeout"`
+	EnableSummaryGeneration   bool          `yaml:"enable_summary_generation"`
 }
 
 // IngestionConfig holds ingestion pipeline settings.
@@ -258,6 +263,10 @@ func DefaultConfig() *Config {
 			SemanticFallback:           true,
 			IntentConfidenceThreshold:  0.7,
 			CacheResults:               true,
+			MinAvailabilityConfidence:  0.6,
+			BatchProcessingWorkers:    5,
+			BatchProcessingTimeout:     30 * time.Second,
+			EnableSummaryGeneration:    false,
 		},
 		Ingestion: IngestionConfig{
 			PDFExtractorPath:   "../pdf-extractor/cmd/pdf-extractor",

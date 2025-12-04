@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +28,15 @@ const (
 	IntentUnknown     Intent = "unknown"
 )
 
+// RequestMode represents the type of request format.
+type RequestMode string
+
+const (
+	RequestModeNaturalLanguage RequestMode = "natural_language"
+	RequestModeStructured      RequestMode = "structured"
+	RequestModeHybrid          RequestMode = "hybrid" // Both formats
+)
+
 // RetrievalRequest represents a knowledge retrieval query.
 type RetrievalRequest struct {
 	TenantID            uuid.UUID
@@ -38,6 +48,10 @@ type RetrievalRequest struct {
 	Filters             RetrievalFilters
 	MaxChunks           int
 	IncludeLineage      bool
+	// New: Structured spec name list from LLM
+	RequestedSpecs []string `json:"requested_specs,omitempty"`
+	// New: Request mode (natural language vs structured)
+	RequestMode RequestMode `json:"request_mode,omitempty"`
 }
 
 // RetrievalFilters holds filtering options.
@@ -61,6 +75,12 @@ type RetrievalResponse struct {
 	SemanticChunks  []SemanticChunk
 	Comparisons     []ComparisonResult
 	Lineage         []LineageInfo
+	// New: Per-spec availability status
+	SpecAvailability []SpecAvailabilityStatus `json:"spec_availability,omitempty"`
+	// New: Overall confidence score
+	OverallConfidence float64 `json:"overall_confidence"`
+	// New: Optional natural language summary
+	Summary *string `json:"summary,omitempty"`
 }
 
 // SpecFact represents a structured specification fact.
@@ -116,6 +136,25 @@ type LineageInfo struct {
 	OccurredAt       time.Time
 }
 
+// AvailabilityStatus represents the availability status of a spec.
+type AvailabilityStatus string
+
+const (
+	AvailabilityStatusFound      AvailabilityStatus = "found"
+	AvailabilityStatusUnavailable AvailabilityStatus = "unavailable"
+	AvailabilityStatusPartial   AvailabilityStatus = "partial" // Found but low confidence
+)
+
+// SpecAvailabilityStatus represents the availability status for a requested spec.
+type SpecAvailabilityStatus struct {
+	SpecName        string            `json:"spec_name"`
+	Status          AvailabilityStatus `json:"status"`
+	MatchedSpecs    []SpecFact        `json:"matched_specs,omitempty"` // If found
+	MatchedChunks   []SemanticChunk   `json:"matched_chunks,omitempty"` // If found
+	Confidence      float64           `json:"confidence"`
+	AlternativeNames []string         `json:"alternative_names,omitempty"` // Synonyms found
+}
+
 // Router orchestrates hybrid retrieval combining structured and semantic search.
 type Router struct {
 	logger           *observability.Logger
@@ -138,6 +177,11 @@ type RouterConfig struct {
 	KeywordConfidenceThreshold float64 // Threshold for keyword-only path (default 0.8)
 	CacheResults              bool
 	CacheTTL                  time.Duration
+	// New fields for structured requests
+	MinAvailabilityConfidence float64       // Threshold for "found" vs "partial"
+	BatchProcessingWorkers    int          // Parallel workers for batch processing
+	BatchProcessingTimeout    time.Duration // Timeout for batch operations
+	EnableSummaryGeneration   bool         // Enable NL summary generation
 }
 
 // RouterMetrics tracks router performance metrics.
@@ -182,6 +226,15 @@ func NewRouter(
 	if cfg.CacheTTL <= 0 {
 		cfg.CacheTTL = 5 * time.Minute
 	}
+	if cfg.MinAvailabilityConfidence <= 0 {
+		cfg.MinAvailabilityConfidence = 0.6 // Default: 60% confidence required
+	}
+	if cfg.BatchProcessingWorkers <= 0 {
+		cfg.BatchProcessingWorkers = 5 // Default: 5 concurrent workers
+	}
+	if cfg.BatchProcessingTimeout <= 0 {
+		cfg.BatchProcessingTimeout = 30 * time.Second // Default: 30 second timeout
+	}
 
 	return &Router{
 		logger:           logger,
@@ -202,6 +255,11 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 	// Apply defaults
 	if req.MaxChunks <= 0 {
 		req.MaxChunks = r.config.MaxChunks
+	}
+
+	// Detect structured request mode
+	if len(req.RequestedSpecs) > 0 {
+		return r.ProcessStructuredSpecs(ctx, req)
 	}
 
 	// Classify intent
@@ -360,6 +418,15 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 		}
 	}
 
+	// Calculate overall confidence and availability status for natural language queries
+	confidenceCalc := NewConfidenceCalculator()
+	response.OverallConfidence = confidenceCalc.CalculateConfidenceForResponse(response)
+	
+	// Determine availability for natural language queries (if we can extract spec names)
+	if req.Question != "" {
+		response.SpecAvailability = r.determineAvailabilityForQuery(ctx, req, response)
+	}
+
 	response.LatencyMs = time.Since(start).Milliseconds()
 
 	// Track latency metrics
@@ -386,6 +453,149 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 		Msg("Retrieval complete")
 
 	return response, nil
+}
+
+// ProcessStructuredSpecs handles LLM-generated spec name lists.
+func (r *Router) ProcessStructuredSpecs(ctx context.Context, req RetrievalRequest) (*RetrievalResponse, error) {
+	start := time.Now()
+
+	if len(req.RequestedSpecs) == 0 {
+		// Fallback to natural language processing
+		return r.Query(ctx, req)
+	}
+
+	r.logger.Debug().
+		Str("tenant_id", req.TenantID.String()).
+		Int("spec_count", len(req.RequestedSpecs)).
+		Msg("Processing structured spec request")
+
+	// Normalize all spec names
+	normalizer := NewSpecNormalizer()
+	normalizedSpecs := make([]string, 0, len(req.RequestedSpecs))
+	specNameMap := make(map[string][]string) // Canonical -> original variations
+
+	for _, specName := range req.RequestedSpecs {
+		canonical, alternatives := normalizer.NormalizeSpecName(specName)
+		normalizedSpecs = append(normalizedSpecs, canonical)
+		specNameMap[canonical] = append(specNameMap[canonical], specName)
+		specNameMap[canonical] = append(specNameMap[canonical], alternatives...)
+	}
+
+	// Create batch processor
+	batchProcessor := NewBatchProcessor(r, r.config.BatchProcessingWorkers, r.config.BatchProcessingTimeout)
+
+	// Process all specs in parallel
+	specStatuses, err := batchProcessor.ProcessSpecsInParallel(ctx, req.RequestedSpecs, req)
+	if err != nil {
+		r.logger.Warn().Err(err).Msg("Batch processing failed, falling back to sequential")
+		// Fallback to sequential processing
+		specStatuses = make([]SpecAvailabilityStatus, 0, len(req.RequestedSpecs))
+		detector := NewAvailabilityDetector(r.config.MinAvailabilityConfidence, 0.5)
+		for _, specName := range req.RequestedSpecs {
+			canonical, alternatives := normalizer.NormalizeSpecName(specName)
+			specReq := req
+			specReq.Question = canonical
+			specReq.RequestedSpecs = nil
+
+			// Try structured search
+			facts, _, _ := r.queryStructuredSpecs(ctx, specReq)
+			// Try semantic search
+			chunks, _ := r.querySemanticChunks(ctx, specReq)
+
+			status := detector.DetermineAvailability(canonical, facts, chunks)
+			status.SpecName = specName
+			status.AlternativeNames = alternatives
+			specStatuses = append(specStatuses, status)
+		}
+	}
+
+	// Aggregate all matched specs and chunks
+	allFacts := make([]SpecFact, 0)
+	allChunks := make([]SemanticChunk, 0)
+	factMap := make(map[string]bool) // Deduplicate facts
+	chunkMap := make(map[uuid.UUID]bool) // Deduplicate chunks
+
+	for _, status := range specStatuses {
+		for _, fact := range status.MatchedSpecs {
+			key := fmt.Sprintf("%s:%s:%s", fact.Category, fact.Name, fact.Value)
+			if !factMap[key] {
+				allFacts = append(allFacts, fact)
+				factMap[key] = true
+			}
+		}
+		for _, chunk := range status.MatchedChunks {
+			if !chunkMap[chunk.ChunkID] {
+				allChunks = append(allChunks, chunk)
+				chunkMap[chunk.ChunkID] = true
+			}
+		}
+	}
+
+	// Build response
+	response := &RetrievalResponse{
+		Intent:            IntentSpecLookup,
+		StructuredFacts:   allFacts,
+		SemanticChunks:    allChunks,
+		SpecAvailability:  specStatuses,
+		LatencyMs:         time.Since(start).Milliseconds(),
+	}
+
+	// Calculate overall confidence
+	confidenceCalc := NewConfidenceCalculator()
+	response.OverallConfidence = confidenceCalc.CalculateConfidenceForResponse(response)
+
+	// Generate summary if requested (will be implemented in summary generator)
+	if req.RequestMode == RequestModeHybrid {
+		summaryGen := NewSummaryGenerator()
+		summary := summaryGen.GenerateSummary(specStatuses, allFacts, allChunks)
+		response.Summary = &summary
+	}
+
+	r.logger.Info().
+		Int64("latency_ms", response.LatencyMs).
+		Int("specs_requested", len(req.RequestedSpecs)).
+		Int("specs_found", countFoundSpecs(specStatuses)).
+		Int("specs_unavailable", countUnavailableSpecs(specStatuses)).
+		Float64("overall_confidence", response.OverallConfidence).
+		Msg("Structured spec retrieval complete")
+
+	return response, nil
+}
+
+// Helper functions for ProcessStructuredSpecs
+func countFoundSpecs(statuses []SpecAvailabilityStatus) int {
+	count := 0
+	for _, status := range statuses {
+		if status.Status == AvailabilityStatusFound {
+			count++
+		}
+	}
+	return count
+}
+
+func countUnavailableSpecs(statuses []SpecAvailabilityStatus) int {
+	count := 0
+	for _, status := range statuses {
+		if status.Status == AvailabilityStatusUnavailable {
+			count++
+		}
+	}
+	return count
+}
+
+// determineAvailabilityForQuery determines availability for natural language queries.
+func (r *Router) determineAvailabilityForQuery(ctx context.Context, req RetrievalRequest, resp *RetrievalResponse) []SpecAvailabilityStatus {
+	// Extract potential spec names from the question
+	// This is a simple implementation - could be enhanced with NLP
+	normalizer := NewSpecNormalizer()
+	keywords := r.extractKeywords(req.Question)
+
+	// Try to identify if question is asking about specific specs
+	// For now, return empty - this can be enhanced later
+	_ = normalizer
+	_ = keywords
+
+	return []SpecAvailabilityStatus{}
 }
 
 // classifyIntent determines the query intent.
@@ -977,7 +1187,23 @@ func (r *Router) buildCacheKey(req RetrievalRequest) string {
 	parts := []string{
 		"retrieval",
 		req.TenantID.String(),
-		req.Question,
+	}
+
+	// Handle structured requests differently
+	if len(req.RequestedSpecs) > 0 {
+		parts = append(parts, "structured")
+		// Use normalized spec names for consistent caching
+		normalizer := NewSpecNormalizer()
+		normalized := make([]string, len(req.RequestedSpecs))
+		for i, spec := range req.RequestedSpecs {
+			canonical, _ := normalizer.NormalizeSpecName(spec)
+			normalized[i] = canonical
+		}
+		// Sort for consistent ordering
+		sort.Strings(normalized)
+		parts = append(parts, strings.Join(normalized, ","))
+	} else {
+		parts = append(parts, req.Question)
 	}
 
 	for _, pid := range req.ProductIDs {

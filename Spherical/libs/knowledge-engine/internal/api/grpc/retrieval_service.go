@@ -40,6 +40,12 @@ type RetrievalRequest struct {
 	ChunkTypes        []string `json:"chunk_types,omitempty"`
 	MaxChunks         int32    `json:"max_chunks,omitempty"`
 	IncludeLineage    bool     `json:"include_lineage,omitempty"`
+	// New: Structured spec name list from LLM
+	RequestedSpecs []string `json:"requested_specs,omitempty"`
+	// New: Request mode (natural language vs structured)
+	RequestMode    string `json:"request_mode,omitempty"`
+	// New: Include natural language summary
+	IncludeSummary bool   `json:"include_summary,omitempty"`
 }
 
 // RetrievalResponse represents the gRPC response message.
@@ -50,6 +56,12 @@ type RetrievalResponse struct {
 	SemanticChunks  []*Chunk      `json:"semantic_chunks"`
 	Comparisons     []*Comparison `json:"comparisons,omitempty"`
 	Lineage         []*Lineage    `json:"lineage,omitempty"`
+	// New: Per-spec availability status
+	SpecAvailability []*SpecAvailability `json:"spec_availability,omitempty"`
+	// New: Overall confidence score
+	OverallConfidence float64 `json:"overall_confidence"`
+	// New: Optional natural language summary
+	Summary *string `json:"summary,omitempty"`
 }
 
 // SpecFact represents a structured spec fact in gRPC.
@@ -99,6 +111,17 @@ type Source struct {
 	DocumentSourceID string `json:"document_source_id,omitempty"`
 	Page             int32  `json:"page,omitempty"`
 	URL              string `json:"url,omitempty"`
+}
+
+// SpecAvailability represents availability status for a spec in gRPC.
+type SpecAvailability struct {
+	SpecName        string   `json:"spec_name"`
+	Status          string   `json:"status"`
+	Confidence      float64  `json:"confidence"`
+	AlternativeNames []string `json:"alternative_names,omitempty"`
+	// Include matched specs/chunks if found
+	MatchedSpecs   []*SpecFact `json:"matched_specs,omitempty"`
+	MatchedChunks  []*Chunk    `json:"matched_chunks,omitempty"`
 }
 
 // Query handles gRPC/Connect retrieval queries.
@@ -155,6 +178,16 @@ func (s *RetrievalService) Query(ctx context.Context, req *connect.Request[Retri
 		maxChunks = 6
 	}
 
+	// Parse request mode
+	var requestMode retrieval.RequestMode
+	if msg.RequestMode != "" {
+		requestMode = retrieval.RequestMode(msg.RequestMode)
+	} else if len(msg.RequestedSpecs) > 0 {
+		requestMode = retrieval.RequestModeStructured
+	} else {
+		requestMode = retrieval.RequestModeNaturalLanguage
+	}
+
 	// Build internal request
 	internalReq := retrieval.RetrievalRequest{
 		TenantID:          tenantID,
@@ -165,6 +198,8 @@ func (s *RetrievalService) Query(ctx context.Context, req *connect.Request[Retri
 		Filters:           filters,
 		MaxChunks:         maxChunks,
 		IncludeLineage:    msg.IncludeLineage,
+		RequestedSpecs:    msg.RequestedSpecs,
+		RequestMode:       requestMode,
 	}
 
 	// Execute query
@@ -250,6 +285,59 @@ func (s *RetrievalService) toGRPCResponse(resp *retrieval.RetrievalResponse) *Re
 			DocumentSourceID: docID,
 			OccurredAt:       lineage.OccurredAt.Format("2006-01-02T15:04:05Z07:00"),
 		})
+	}
+
+	// Convert spec availability statuses
+	grpcResp.SpecAvailability = make([]*SpecAvailability, 0, len(resp.SpecAvailability))
+	for _, status := range resp.SpecAvailability {
+		grpcStatus := &SpecAvailability{
+			SpecName:        status.SpecName,
+			Status:          string(status.Status),
+			Confidence:      status.Confidence,
+			AlternativeNames: status.AlternativeNames,
+		}
+
+		// Convert matched specs
+		grpcStatus.MatchedSpecs = make([]*SpecFact, 0, len(status.MatchedSpecs))
+		for _, fact := range status.MatchedSpecs {
+			grpcStatus.MatchedSpecs = append(grpcStatus.MatchedSpecs, &SpecFact{
+				SpecItemID:        fact.SpecItemID.String(),
+				Category:          fact.Category,
+				Name:              fact.Name,
+				Value:              fact.Value,
+				Unit:               fact.Unit,
+				Confidence:         fact.Confidence,
+				CampaignVariantID:  fact.CampaignVariantID.String(),
+				Source:             s.toGRPCSource(fact.Source),
+			})
+		}
+
+		// Convert matched chunks
+		grpcStatus.MatchedChunks = make([]*Chunk, 0, len(status.MatchedChunks))
+		for _, chunk := range status.MatchedChunks {
+			metadata := make(map[string]string)
+			for k, v := range chunk.Metadata {
+				if str, ok := v.(string); ok {
+					metadata[k] = str
+				}
+			}
+			grpcStatus.MatchedChunks = append(grpcStatus.MatchedChunks, &Chunk{
+				ChunkID:   chunk.ChunkID.String(),
+				ChunkType: string(chunk.ChunkType),
+				Text:      chunk.Text,
+				Distance:  chunk.Distance,
+				Metadata:  metadata,
+				Source:    s.toGRPCSource(chunk.Source),
+			})
+		}
+
+		grpcResp.SpecAvailability = append(grpcResp.SpecAvailability, grpcStatus)
+	}
+
+	// Set overall confidence and summary
+	grpcResp.OverallConfidence = resp.OverallConfidence
+	if resp.Summary != nil {
+		grpcResp.Summary = resp.Summary
 	}
 
 	return grpcResp
