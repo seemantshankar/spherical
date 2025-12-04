@@ -12,15 +12,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/embedding"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/monitoring"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/observability"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/retrieval"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/storage"
 )
 
 // Pipeline orchestrates the brochure ingestion process.
 type Pipeline struct {
-	logger          *observability.Logger
-	parser          *Parser
-	config          PipelineConfig
+	logger        *observability.Logger
+	parser        *Parser
+	config        PipelineConfig
+	repos         *storage.Repositories
+	embedder      embedding.Embedder
+	vectorAdapter retrieval.VectorAdapter
+	lineageWriter *monitoring.LineageWriter
 }
 
 // PipelineConfig holds pipeline configuration.
@@ -34,9 +41,9 @@ type PipelineConfig struct {
 
 // IngestionRequest represents a request to ingest a brochure.
 type IngestionRequest struct {
-	TenantID    uuid.UUID
-	ProductID   uuid.UUID
-	CampaignID  uuid.UUID
+	TenantID     uuid.UUID
+	ProductID    uuid.UUID
+	CampaignID   uuid.UUID
 	MarkdownPath string
 	PDFPath      string
 	SourceFile   string
@@ -62,14 +69,25 @@ type IngestionResult struct {
 }
 
 // NewPipeline creates a new ingestion pipeline.
-func NewPipeline(logger *observability.Logger, cfg PipelineConfig) *Pipeline {
+func NewPipeline(
+	logger *observability.Logger,
+	cfg PipelineConfig,
+	repos *storage.Repositories,
+	embedder embedding.Embedder,
+	vectorAdapter retrieval.VectorAdapter,
+	lineageWriter *monitoring.LineageWriter,
+) *Pipeline {
 	return &Pipeline{
 		logger: logger,
 		parser: NewParser(ParserConfig{
 			ChunkSize:    cfg.ChunkSize,
 			ChunkOverlap: cfg.ChunkOverlap,
 		}),
-		config: cfg,
+		config:        cfg,
+		repos:         repos,
+		embedder:      embedder,
+		vectorAdapter: vectorAdapter,
+		lineageWriter: lineageWriter,
 	}
 }
 
@@ -166,8 +184,8 @@ func (p *Pipeline) Ingest(ctx context.Context, req IngestionRequest) (*Ingestion
 	// Determine final status
 	if len(result.ConflictingSpecs) > 0 {
 		result.Status = storage.JobStatusSucceeded // Job succeeded but has conflicts
-		result.Errors = append(result.Errors, 
-			fmt.Sprintf("%d conflicting specs detected - publish blocked until resolved", 
+		result.Errors = append(result.Errors,
+			fmt.Sprintf("%d conflicting specs detected - publish blocked until resolved",
 				len(result.ConflictingSpecs)))
 	} else {
 		result.Status = storage.JobStatusSucceeded
@@ -225,7 +243,7 @@ func (p *Pipeline) extractFromPDF(ctx context.Context, pdfPath string) (string, 
 	defer os.Remove(tmpPath)
 
 	// Run the extractor
-	cmd := exec.CommandContext(ctx, 
+	cmd := exec.CommandContext(ctx,
 		"go", "run", extractorPath,
 		"--input", pdfPath,
 		"--output", tmpPath,
@@ -279,8 +297,16 @@ func (p *Pipeline) createDocumentSource(ctx context.Context, req IngestionReques
 		UploadedAt:        time.Now(),
 	}
 
-	// TODO: Actually persist to database
-	// For now, just return the constructed object
+	// Persist to database
+	if p.repos != nil && p.repos.DocumentSources != nil {
+		if err := p.repos.DocumentSources.Create(ctx, docSource); err != nil {
+			return nil, fmt.Errorf("persist document source: %w", err)
+		}
+		p.logger.Debug().
+			Str("doc_source_id", docSource.ID.String()).
+			Str("sha256", sha256Hex).
+			Msg("Created document source")
+	}
 
 	return docSource, nil
 }
@@ -296,21 +322,61 @@ type SpecsResult struct {
 func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs []ParsedSpec, docSourceID uuid.UUID) (*SpecsResult, error) {
 	result := &SpecsResult{}
 
+	if p.repos == nil {
+		return result, fmt.Errorf("repositories not initialized")
+	}
+
 	for _, spec := range specs {
+		// Look up or create spec category
+		category, err := p.repos.SpecCategories.GetOrCreate(ctx, spec.Category)
+		if err != nil {
+			p.logger.Warn().
+				Err(err).
+				Str("category", spec.Category).
+				Msg("Failed to get or create spec category")
+			continue
+		}
+
+		// Look up or create spec item
+		var unitPtr *string
+		if spec.Unit != "" {
+			unitPtr = &spec.Unit
+		}
+		specItem, err := p.repos.SpecItems.GetOrCreate(ctx, category.ID, spec.Name, unitPtr)
+		if err != nil {
+			p.logger.Warn().
+				Err(err).
+				Str("category", spec.Category).
+				Str("name", spec.Name).
+				Msg("Failed to get or create spec item")
+			continue
+		}
+
 		// Generate deterministic ID
 		specID := GenerateSpecID(req.TenantID, req.ProductID, spec.Category, spec.Name)
 
-		// Check for existing spec with same category/name
-		// TODO: Query database for existing spec
-		existing := false // Placeholder
+		// Check for existing spec with same ID
+		existingSpecs, err := p.repos.SpecValues.GetByCampaign(ctx, req.TenantID, req.CampaignID)
+		existing := false
+		var existingSpec *storage.SpecValue
+		if err == nil {
+			for _, es := range existingSpecs {
+				if es.ID == specID {
+					existing = true
+					existingSpec = es
+					break
+				}
+			}
+		}
 
 		specValue := &storage.SpecValue{
 			ID:                specID,
 			TenantID:          req.TenantID,
 			ProductID:         req.ProductID,
 			CampaignVariantID: req.CampaignID,
+			SpecItemID:        specItem.ID,
 			ValueText:         &spec.Value,
-			Unit:              &spec.Unit,
+			Unit:              unitPtr,
 			Confidence:        spec.Confidence,
 			Status:            storage.SpecStatusActive,
 			SourceDocID:       &docSourceID,
@@ -322,25 +388,53 @@ func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs [
 			specValue.ValueNumeric = spec.Numeric
 		}
 
-		// TODO: Look up spec_item_id from canonical catalog
-		// For now, we'd need to create spec items if they don't exist
-
 		if existing {
-			// Check for conflict
-			// If values differ and both have high confidence, mark as conflict
-			// TODO: Implement conflict detection
+			// Check for conflict: values differ and both have high confidence
+			if existingSpec != nil {
+				valueChanged := false
+				if spec.Numeric != nil && existingSpec.ValueNumeric != nil {
+					valueChanged = *spec.Numeric != *existingSpec.ValueNumeric
+				} else if spec.Value != "" && existingSpec.ValueText != nil {
+					valueChanged = spec.Value != *existingSpec.ValueText
+				}
+
+				if valueChanged && spec.Confidence > 0.8 && existingSpec.Confidence > 0.8 {
+					specValue.Status = storage.SpecStatusConflict
+					result.Conflicts = append(result.Conflicts, specID)
+					p.logger.Warn().
+						Str("spec_id", specID.String()).
+						Str("category", spec.Category).
+						Str("name", spec.Name).
+						Msg("Spec conflict detected")
+				}
+			}
 			result.Updated++
 		} else {
 			result.Created++
 		}
 
-		// TODO: Persist to database
+		// Persist to database
+		if err := p.repos.SpecValues.Create(ctx, specValue); err != nil {
+			p.logger.Warn().
+				Err(err).
+				Str("spec_id", specID.String()).
+				Str("category", spec.Category).
+				Str("name", spec.Name).
+				Msg("Failed to persist spec value")
+			continue
+		}
+
+		// Record lineage event
+		if p.lineageWriter != nil {
+			_ = p.lineageWriter.RecordSpecCreation(ctx, req.TenantID, req.ProductID, req.CampaignID, specID, &docSourceID, nil)
+		}
+
 		p.logger.Debug().
 			Str("spec_id", specID.String()).
 			Str("category", spec.Category).
 			Str("name", spec.Name).
 			Str("value", spec.Value).
-			Msg("Processing spec value")
+			Msg("Persisted spec value")
 	}
 
 	return result, nil
@@ -349,6 +443,10 @@ func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs [
 // storeFeatures persists feature blocks.
 func (p *Pipeline) storeFeatures(ctx context.Context, req IngestionRequest, features []ParsedFeature, docSourceID uuid.UUID) (int, error) {
 	created := 0
+
+	if p.repos == nil {
+		return 0, fmt.Errorf("repositories not initialized")
+	}
 
 	for _, feature := range features {
 		featureBlock := &storage.FeatureBlock{
@@ -365,9 +463,25 @@ func (p *Pipeline) storeFeatures(ctx context.Context, req IngestionRequest, feat
 			SourcePage:        &feature.SourcePage,
 		}
 
-		// TODO: Persist to database
-		_ = featureBlock
+		// Persist to database
+		if err := p.repos.FeatureBlocks.Create(ctx, featureBlock); err != nil {
+			p.logger.Warn().
+				Err(err).
+				Str("feature_id", featureBlock.ID.String()).
+				Msg("Failed to persist feature block")
+			continue
+		}
+
+		// Record lineage event
+		if p.lineageWriter != nil {
+			_ = p.lineageWriter.RecordFeatureCreation(ctx, req.TenantID, req.ProductID, req.CampaignID, featureBlock.ID, string(storage.BlockTypeFeature), &docSourceID)
+		}
+
 		created++
+		p.logger.Debug().
+			Str("feature_id", featureBlock.ID.String()).
+			Int("priority", feature.Priority).
+			Msg("Persisted feature block")
 	}
 
 	return created, nil
@@ -376,6 +490,10 @@ func (p *Pipeline) storeFeatures(ctx context.Context, req IngestionRequest, feat
 // storeUSPs persists USP blocks.
 func (p *Pipeline) storeUSPs(ctx context.Context, req IngestionRequest, usps []ParsedUSP, docSourceID uuid.UUID) (int, error) {
 	created := 0
+
+	if p.repos == nil {
+		return 0, fmt.Errorf("repositories not initialized")
+	}
 
 	for _, usp := range usps {
 		uspBlock := &storage.FeatureBlock{
@@ -392,9 +510,25 @@ func (p *Pipeline) storeUSPs(ctx context.Context, req IngestionRequest, usps []P
 			SourcePage:        &usp.SourcePage,
 		}
 
-		// TODO: Persist to database
-		_ = uspBlock
+		// Persist to database
+		if err := p.repos.FeatureBlocks.Create(ctx, uspBlock); err != nil {
+			p.logger.Warn().
+				Err(err).
+				Str("usp_id", uspBlock.ID.String()).
+				Msg("Failed to persist USP block")
+			continue
+		}
+
+		// Record lineage event
+		if p.lineageWriter != nil {
+			_ = p.lineageWriter.RecordFeatureCreation(ctx, req.TenantID, req.ProductID, req.CampaignID, uspBlock.ID, string(storage.BlockTypeUSP), &docSourceID)
+		}
+
 		created++
+		p.logger.Debug().
+			Str("usp_id", uspBlock.ID.String()).
+			Int("priority", usp.Priority).
+			Msg("Persisted USP block")
 	}
 
 	return created, nil
@@ -404,7 +538,38 @@ func (p *Pipeline) storeUSPs(ctx context.Context, req IngestionRequest, usps []P
 func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks []ParsedChunk, docSourceID uuid.UUID) (int, error) {
 	created := 0
 
-	for _, chunk := range chunks {
+	if p.repos == nil {
+		return 0, fmt.Errorf("repositories not initialized")
+	}
+
+	// Batch generate embeddings if embedder is available
+	var embeddings [][]float32
+	if p.embedder != nil && len(chunks) > 0 {
+		texts := make([]string, len(chunks))
+		for i, chunk := range chunks {
+			texts[i] = chunk.Text
+		}
+
+		var err error
+		embeddings, err = p.embedder.Embed(ctx, texts)
+		if err != nil {
+			p.logger.Warn().
+				Err(err).
+				Int("chunk_count", len(chunks)).
+				Msg("Failed to generate embeddings, storing chunks without embeddings")
+		}
+	}
+
+	embeddingModel := "unknown"
+	embeddingVersion := "1.0"
+	if p.embedder != nil {
+		embeddingModel = p.embedder.Model()
+	}
+
+	// Prepare vector entries for batch insert
+	var vectorEntries []retrieval.VectorEntry
+
+	for i, chunk := range chunks {
 		knowledgeChunk := &storage.KnowledgeChunk{
 			ID:                uuid.New(),
 			TenantID:          req.TenantID,
@@ -417,10 +582,65 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			Visibility:        storage.VisibilityPrivate,
 		}
 
-		// TODO: Generate embedding
-		// TODO: Persist to database and vector store
-		_ = knowledgeChunk
+		// Set embedding if available
+		if i < len(embeddings) && len(embeddings[i]) > 0 {
+			knowledgeChunk.EmbeddingVector = embeddings[i]
+			knowledgeChunk.EmbeddingModel = &embeddingModel
+			knowledgeChunk.EmbeddingVersion = &embeddingVersion
+		}
+
+		// Persist to database
+		if err := p.repos.KnowledgeChunks.Create(ctx, knowledgeChunk); err != nil {
+			p.logger.Warn().
+				Err(err).
+				Str("chunk_id", knowledgeChunk.ID.String()).
+				Msg("Failed to persist knowledge chunk")
+			continue
+		}
+
+		// Add to vector store if embedding is available
+		if p.vectorAdapter != nil && len(knowledgeChunk.EmbeddingVector) > 0 {
+			vectorEntries = append(vectorEntries, retrieval.VectorEntry{
+				ID:                knowledgeChunk.ID,
+				TenantID:          req.TenantID,
+				ProductID:         req.ProductID,
+				CampaignVariantID: &req.CampaignID,
+				ChunkType:         string(knowledgeChunk.ChunkType),
+				Visibility:        string(knowledgeChunk.Visibility),
+				EmbeddingVersion:  embeddingVersion,
+				Vector:            knowledgeChunk.EmbeddingVector,
+				Metadata: map[string]interface{}{
+					"text":       knowledgeChunk.Text,
+					"source_doc": docSourceID.String(),
+				},
+			})
+		}
+
+		// Record lineage event
+		if p.lineageWriter != nil {
+			_ = p.lineageWriter.RecordChunkCreation(ctx, req.TenantID, req.ProductID, &req.CampaignID, knowledgeChunk.ID, string(chunk.ChunkType), &docSourceID)
+		}
+
 		created++
+		p.logger.Debug().
+			Str("chunk_id", knowledgeChunk.ID.String()).
+			Str("chunk_type", string(chunk.ChunkType)).
+			Bool("has_embedding", len(knowledgeChunk.EmbeddingVector) > 0).
+			Msg("Persisted knowledge chunk")
+	}
+
+	// Batch insert into vector store
+	if p.vectorAdapter != nil && len(vectorEntries) > 0 {
+		if err := p.vectorAdapter.Insert(ctx, vectorEntries); err != nil {
+			p.logger.Warn().
+				Err(err).
+				Int("vector_count", len(vectorEntries)).
+				Msg("Failed to insert vectors into vector store")
+		} else {
+			p.logger.Debug().
+				Int("vector_count", len(vectorEntries)).
+				Msg("Inserted vectors into vector store")
+		}
 	}
 
 	return created, nil
@@ -428,8 +648,28 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 
 // emitLineageEvents records audit events for the ingestion.
 func (p *Pipeline) emitLineageEvents(ctx context.Context, req IngestionRequest, result *IngestionResult) error {
-	// TODO: Emit lineage events to the database
-	// This would create entries in the lineage_events table
+	if p.lineageWriter == nil {
+		p.logger.Debug().Msg("Lineage writer not configured, skipping lineage events")
+		return nil
+	}
+
+	// Record ingestion start
+	if err := p.lineageWriter.RecordIngestionStart(ctx, req.TenantID, req.ProductID, req.CampaignID, result.JobID, req.Operator); err != nil {
+		p.logger.Warn().Err(err).Msg("Failed to record ingestion start")
+	}
+
+	// Record ingestion completion with stats
+	stats := map[string]int{
+		"specs_created":    result.SpecsCreated,
+		"specs_updated":    result.SpecsUpdated,
+		"features_created": result.FeaturesCreated,
+		"usps_created":     result.USPsCreated,
+		"chunks_created":   result.ChunksCreated,
+		"conflicts":        len(result.ConflictingSpecs),
+	}
+	if err := p.lineageWriter.RecordIngestionComplete(ctx, req.TenantID, req.ProductID, req.CampaignID, result.JobID, stats); err != nil {
+		p.logger.Warn().Err(err).Msg("Failed to record ingestion completion")
+	}
 
 	p.logger.Debug().
 		Str("job_id", result.JobID.String()).
@@ -437,7 +677,7 @@ func (p *Pipeline) emitLineageEvents(ctx context.Context, req IngestionRequest, 
 		Int("features", result.FeaturesCreated).
 		Int("usps", result.USPsCreated).
 		Int("chunks", result.ChunksCreated).
-		Msg("Emitting lineage events")
+		Msg("Emitted lineage events")
 
 	return nil
 }
@@ -452,4 +692,3 @@ func (p *Pipeline) Deduplicate(content string, threshold float64) (bool, string,
 
 	return false, hashHex, nil
 }
-

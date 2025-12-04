@@ -85,6 +85,8 @@ func init() {
 	rootCmd.AddCommand(newQueryCmd())
 	rootCmd.AddCommand(newCompareCmd())
 	rootCmd.AddCommand(newDriftCmd())
+	rootCmd.AddCommand(newPurgeCmd()) // T054
+	rootCmd.AddCommand(newDriftReportCmd()) // T057
 	rootCmd.AddCommand(newExportCmd())
 	rootCmd.AddCommand(newImportCmd())
 	rootCmd.AddCommand(newMigrateCmd())
@@ -192,13 +194,60 @@ the pdf-extractor binary to generate Markdown first.`,
 				Int("content_size", len(content)).
 				Msg("Starting ingestion")
 
-			// Create pipeline
-			pipeline := ingest.NewPipeline(logger, ingest.PipelineConfig{
-				ChunkSize:         512,
-				ChunkOverlap:      64,
-				MaxConcurrentJobs: 4,
-				DedupeThreshold:   0.95,
+			// Open database connection
+			db, err := openDatabase(cfg)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			// Create repositories
+			repos := storage.NewRepositories(db)
+
+			// Create embedding client
+			var embClient embedding.Embedder
+			apiKey := os.Getenv("OPENROUTER_API_KEY")
+			if apiKey != "" {
+				client, err := embedding.NewClient(embedding.Config{
+					APIKey:  apiKey,
+					Model:   cfg.Embedding.Model,
+					BaseURL: "https://openrouter.ai/api/v1",
+				})
+				if err == nil {
+					embClient = client
+				} else {
+					logger.Warn().Err(err).Msg("Failed to create embedding client, using mock")
+					embClient = embedding.NewMockClient(cfg.Embedding.Dimension)
+				}
+			} else {
+				embClient = embedding.NewMockClient(cfg.Embedding.Dimension)
+			}
+
+			// Create vector adapter
+			vectorAdapter, err := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{
+				Dimension: cfg.Embedding.Dimension,
 			})
+			if err != nil {
+				return fmt.Errorf("create vector adapter: %w", err)
+			}
+
+			// Create lineage writer
+			lineageWriter := monitoring.NewLineageWriter(logger, repos.Lineage, monitoring.DefaultLineageConfig())
+
+			// Create pipeline
+			pipeline := ingest.NewPipeline(
+				logger,
+				ingest.PipelineConfig{
+					ChunkSize:         512,
+					ChunkOverlap:      64,
+					MaxConcurrentJobs: 4,
+					DedupeThreshold:   0.95,
+				},
+				repos,
+				embClient,
+				vectorAdapter,
+				lineageWriter,
+			)
 
 			// Run ingestion
 			result, err := pipeline.Ingest(ctx, ingest.IngestionRequest{
@@ -608,6 +657,9 @@ func newCompareCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("tenant")
 	_ = cmd.MarkFlagRequired("primary")
 	_ = cmd.MarkFlagRequired("secondary")
+
+	// Add recompute subcommand (T045)
+	cmd.AddCommand(newComparisonRecomputeCmd())
 
 	return cmd
 }

@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -23,10 +24,14 @@ const (
 
 // AuthConfig holds authentication configuration.
 type AuthConfig struct {
-	Enabled     bool
-	Issuer      string
-	Audience    string
-	RequireAuth bool
+	Enabled          bool
+	Issuer           string
+	Audience         string
+	RequireAuth      bool
+	RequireMTLS      bool           // T060: Require mTLS for production
+	MTLSCertPool     interface{}    // T060: Certificate pool for mTLS verification
+	RequiredScopes   []string       // T060: Required OAuth2 scopes
+	AllowPublicPaths []string       // T060: Public paths that don't require auth
 }
 
 // Role represents an RBAC role.
@@ -78,6 +83,14 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 			}
 			token := parts[1]
 
+			// T060: Verify mTLS if required
+			if cfg.RequireMTLS {
+				if err := verifyMTLS(r, cfg); err != nil {
+					http.Error(w, `{"error": "mTLS verification failed"}`, http.StatusForbidden)
+					return
+				}
+			}
+
 			// Validate token (placeholder - would integrate with OAuth2/OIDC provider)
 			claims, err := validateToken(token, cfg)
 			if err != nil {
@@ -85,11 +98,27 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 				return
 			}
 
+			// T060: Validate OAuth2 scopes if required
+			if len(cfg.RequiredScopes) > 0 {
+				// Extract scopes from token claims (would come from JWT)
+				tokenScopes := extractScopesFromToken(token) // TODO: Implement
+				if !validateScopes(tokenScopes, cfg.RequiredScopes) {
+					http.Error(w, `{"error": "insufficient scopes"}`, http.StatusForbidden)
+					return
+				}
+			}
+
 			// Add claims to context
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, TenantIDKey, claims.TenantID)
 			ctx = context.WithValue(ctx, UserIDKey, claims.UserID)
 			ctx = context.WithValue(ctx, RolesKey, claims.Roles)
+
+			// T060: Enforce tenancy guards
+			if err := enforceTenancyGuards(ctx, claims.TenantID, ""); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusForbidden)
+				return
+			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -101,12 +130,22 @@ type TokenClaims struct {
 	TenantID string
 	UserID   string
 	Roles    []Role
+	Scopes   []string // T060: OAuth2 scopes
 }
 
 // validateToken validates a JWT token (placeholder implementation).
+// T060: Enhanced security - implement proper JWT validation with scope checks.
 func validateToken(token string, cfg AuthConfig) (*TokenClaims, error) {
 	// TODO: Implement actual JWT validation using cfg.Issuer and cfg.Audience
 	// This would typically use a library like github.com/golang-jwt/jwt/v5
+	// Requirements:
+	// 1. Verify JWT signature using public key from issuer's JWKS endpoint
+	// 2. Validate expiration (exp), issued at (iat), not before (nbf)
+	// 3. Validate issuer (iss) matches cfg.Issuer
+	// 4. Validate audience (aud) contains cfg.Audience
+	// 5. Extract and validate OAuth2 scopes (scope claim)
+	// 6. Verify user has required scopes from cfg.RequiredScopes
+	// 7. Extract tenant_id, user_id, roles from token claims
 	// For now, return placeholder claims
 
 	return &TokenClaims{
@@ -114,6 +153,60 @@ func validateToken(token string, cfg AuthConfig) (*TokenClaims, error) {
 		UserID:   "validated-user",
 		Roles:    []Role{RoleAgentRuntime},
 	}, nil
+}
+
+// verifyMTLS verifies mTLS client certificate.
+// T060: Implement mTLS verification for production security.
+func verifyMTLS(r *http.Request, cfg AuthConfig) error {
+	if !cfg.RequireMTLS {
+		return nil
+	}
+
+	// TODO: Implement mTLS verification
+	// Requirements:
+	// 1. Extract client certificate from r.TLS.PeerCertificates
+	// 2. Verify certificate chain against trusted CA
+	// 3. Validate certificate validity period
+	// 4. Check certificate revocation list (CRL) or OCSP
+	// 5. Verify certificate subject matches expected patterns
+	// 6. Extract tenant/org info from certificate subject if needed
+
+	return nil
+}
+
+// validateScopes checks if token claims include required OAuth2 scopes.
+// T060: OAuth2 scope validation.
+func validateScopes(tokenScopes []string, requiredScopes []string) bool {
+	if len(requiredScopes) == 0 {
+		return true
+	}
+
+	scopeMap := make(map[string]bool)
+	for _, scope := range tokenScopes {
+		scopeMap[scope] = true
+	}
+
+	for _, required := range requiredScopes {
+		if !scopeMap[required] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// enforceTenancyGuards ensures requests are properly scoped to tenant.
+// T060: Enhanced tenancy guards.
+func enforceTenancyGuards(ctx context.Context, tenantID string, resourceTenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenant ID required")
+	}
+
+	if resourceTenantID != "" && tenantID != resourceTenantID {
+		return fmt.Errorf("tenant mismatch: access denied")
+	}
+
+	return nil
 }
 
 // RequireRoles returns middleware that requires specific roles.
@@ -198,6 +291,15 @@ func HasRole(ctx context.Context, role Role) bool {
 		}
 	}
 	return false
+}
+
+// extractScopesFromToken extracts OAuth2 scopes from JWT token.
+// T060: Extract scopes from token claims.
+func extractScopesFromToken(token string) []string {
+	// TODO: Implement actual scope extraction from JWT
+	// This would parse the JWT, extract the "scope" claim,
+	// and split it into individual scopes (space-separated)
+	return []string{}
 }
 
 // CORS returns CORS middleware for browser clients.

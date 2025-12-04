@@ -69,7 +69,7 @@
 
 - [X] T025 [P] [US2] Add retrieval contract tests to `tests/contract/knowledge-engine/retrieval.http` and GraphQL/gRPC equivalents covering spec lookup, semantic fallback, cache hits.
 - [X] T026 [P] [US2] Add integration test for hybrid router in `libs/knowledge-engine/tests/integration/retrieval_test.go`.
-- [ ] T027 [P] [US2] Add audit logging integration test ensuring retrieval requests emit events in `tests/integration/knowledge-engine/retrieval_audit_test.go`.
+- [X] T027 [P] [US2] Add audit logging integration test ensuring retrieval requests emit events in `tests/integration/knowledge-engine/retrieval_audit_test.go`.
 
 ### Implementation – User Story 2
 
@@ -103,15 +103,15 @@
 ### Tests – User Story 3
 
 - [X] T039 [P] [US3] Add comparison contract tests in `tests/contract/knowledge-engine/comparisons.http` (REST + GraphQL/gRPC variants).
-- [ ] T040 [P] [US3] Add integration test for comparison materializer job (`tests/integration/knowledge-engine/comparison_job_test.go`).
-- [ ] T041 [P] [US3] Add audit logging integration test for comparison requests in `tests/integration/knowledge-engine/comparison_audit_test.go`.
+- [X] T040 [P] [US3] Add integration test for comparison materializer job (`tests/integration/knowledge-engine/comparison_job_test.go`).
+- [X] T041 [P] [US3] Add audit logging integration test for comparison requests in `tests/integration/knowledge-engine/comparison_audit_test.go`.
 
 ### Implementation – User Story 3
 
 - [X] T042 [US3] Implement comparison materializer + scheduler in `internal/comparison/materializer.go`.
 - [X] T043 [P] [US3] Enforce shareability policies in `internal/comparison/materializer.go` (benchmark/public/private logic + enforcement guards).
 - [X] T044 [US3] Build `/comparisons/query` handlers for REST in `cmd/knowledge-engine-api/handlers/comparison.go`.
-- [ ] T045 [US3] Backfill CLI/ADMIN triggers for recomputing comparisons in `cmd/knowledge-engine-cli/comparisons.go`.
+- [X] T045 [US3] Backfill CLI/ADMIN triggers for recomputing comparisons in `cmd/knowledge-engine-cli/comparisons.go`.
 - [X] T046 [US3] Add CLI comparison query command in `cmd/knowledge-engine-cli/main.go` (compare subcommand) with JSON output.
 - [X] T047 [US3] Wire audit logging into comparison handlers/CLI so every comparator response records provenance in `internal/monitoring/audit_logger.go`.
 
@@ -126,7 +126,7 @@
 ### Tests – User Story 4
 
 - [X] T048 [P] [US4] Add lineage contract tests in `tests/contract/knowledge-engine/lineage.http` (REST + GraphQL/gRPC).
-- [ ] T049 [P] [US4] Add integration test covering drift detection, purge flow, and embedding-version guardrails in `tests/integration/knowledge-engine/drift_monitor_test.go`.
+- [X] T049 [P] [US4] Add integration test covering drift detection, purge flow, and embedding-version guardrails in `tests/integration/knowledge-engine/drift_monitor_test.go`.
 
 ### Implementation – User Story 4
 
@@ -134,10 +134,10 @@
 - [X] T051 [P] [US4] Implement drift detection runner comparing hashes/ages in `internal/monitoring/drift_runner.go`.
 - [X] T052 [US4] Expose `/lineage/{resourceType}/{resourceId}` handlers for REST in `cmd/knowledge-engine-api/handlers/lineage.go`.
 - [X] T053 [US4] Add CLI drift command in `cmd/knowledge-engine-cli/main.go` (drift subcommand) with check and report options.
-- [ ] T054 [US4] Implement retention/purge tooling (`cmd/knowledge-engine-cli/purge.go`) that deletes tenant data within 30 days and logs audit trails.
-- [ ] T055 [US4] Detect embedding model version mismatches and queue re-embedding jobs (`internal/monitoring/embedding_guard.go`) so mixed vectors are never queried together.
+- [X] T054 [US4] Implement retention/purge tooling (`cmd/knowledge-engine-cli/purge.go`) that deletes tenant data within 30 days and logs audit trails.
+- [X] T055 [US4] Detect embedding model version mismatches and queue re-embedding jobs (`internal/monitoring/embedding_guard.go`) so mixed vectors are never queried together.
 - [X] T056 [US4] Add REST endpoint for listing drift alerts (`cmd/knowledge-engine-api/handlers/lineage.go`) consumed by dashboards.
-- [ ] T057 [US4] Add CLI drift report command (`cmd/knowledge-engine-cli/drift_report.go`) summarizing open alerts for analysts.
+- [X] T057 [US4] Add CLI drift report command (`cmd/knowledge-engine-cli/drift_report.go`) summarizing open alerts for analysts.
 
 ---
 
@@ -145,7 +145,7 @@
 
 - [X] T058 [P] Update Quickstart + README with verified commands (REST/GraphQL/gRPC, CLI queries, export/import, FAISS toggle) (`libs/knowledge-engine/README.md`).
 - [X] T059 Run Schemathesis + load tests (200 RPS mixed workload) and capture results under `tests/perf/retrieval_load.md`.
-- [ ] T060 [P] Harden security (OAuth2 scopes, mTLS verification, tenancy guards) in `cmd/knowledge-engine-api/middleware/auth.go`.
+- [X] T060 [P] Harden security (OAuth2 scopes, mTLS verification, tenancy guards) in `cmd/knowledge-engine-api/middleware/auth.go`.
 - [X] T061 Finalize observability dashboards + alert rules and document in `docs/ops/monitoring.md`.
 
 ---

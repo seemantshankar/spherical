@@ -221,7 +221,7 @@ func (p *Publisher) Rollback(ctx context.Context, req RollbackRequest) (*Rollbac
 }
 
 // getCampaign retrieves a campaign by ID.
-func (p *Publisher) getCampaign(ctx context.Context, tenantID, campaignID uuid.UUID) (*storage.CampaignVariant, error) {
+func (p *Publisher) getCampaign(_ context.Context, tenantID, campaignID uuid.UUID) (*storage.CampaignVariant, error) {
 	// TODO: Implement actual database query
 	// For now, return a placeholder
 
@@ -235,19 +235,19 @@ func (p *Publisher) getCampaign(ctx context.Context, tenantID, campaignID uuid.U
 }
 
 // getCampaignVersion retrieves a specific version of a campaign.
-func (p *Publisher) getCampaignVersion(ctx context.Context, tenantID, campaignID uuid.UUID, version int) (*storage.CampaignVariant, error) {
+func (p *Publisher) getCampaignVersion(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int) (*storage.CampaignVariant, error) {
 	// TODO: Implement actual database query
 	return nil, ErrCampaignNotFound
 }
 
 // checkConflicts returns any unresolved spec conflicts for the campaign.
-func (p *Publisher) checkConflicts(ctx context.Context, tenantID, campaignID uuid.UUID) ([]uuid.UUID, error) {
+func (p *Publisher) checkConflicts(_ context.Context, _ uuid.UUID, _ uuid.UUID) ([]uuid.UUID, error) {
 	// TODO: Query spec_values where status = 'conflict' for this campaign
 	return nil, nil
 }
 
 // archivePreviousVersion marks the previous published version as archived.
-func (p *Publisher) archivePreviousVersion(ctx context.Context, tenantID, productID, currentCampaignID uuid.UUID) error {
+func (p *Publisher) archivePreviousVersion(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID) error {
 	// TODO: Update previous published campaign variants for this product
 	// SET status = 'archived', effective_through = NOW()
 	// WHERE product_id = $1 AND status = 'published' AND id != $2
@@ -255,31 +255,31 @@ func (p *Publisher) archivePreviousVersion(ctx context.Context, tenantID, produc
 }
 
 // refreshMaterializedViews updates the spec_view_latest view.
-func (p *Publisher) refreshMaterializedViews(ctx context.Context, tenantID uuid.UUID) error {
+func (p *Publisher) refreshMaterializedViews(_ context.Context, _ uuid.UUID) error {
 	// TODO: Execute REFRESH MATERIALIZED VIEW spec_view_latest
 	return nil
 }
 
 // emitPublishEvent records a publish audit event.
-func (p *Publisher) emitPublishEvent(ctx context.Context, req PublishRequest, newVersion int) error {
+func (p *Publisher) emitPublishEvent(_ context.Context, _ PublishRequest, _ int) error {
 	// TODO: Insert into lineage_events
 	return nil
 }
 
 // emitRollbackEvent records a rollback audit event.
-func (p *Publisher) emitRollbackEvent(ctx context.Context, req RollbackRequest, previousVersion int) error {
+func (p *Publisher) emitRollbackEvent(_ context.Context, _ RollbackRequest, _ int) error {
 	// TODO: Insert into lineage_events
 	return nil
 }
 
 // invalidateCaches clears cached data for the campaign.
-func (p *Publisher) invalidateCaches(ctx context.Context, tenantID, campaignID uuid.UUID) error {
+func (p *Publisher) invalidateCaches(_ context.Context, _ uuid.UUID, _ uuid.UUID) error {
 	// TODO: Delete cache entries for this campaign
 	return nil
 }
 
 // ResolveConflict marks a spec value conflict as resolved.
-func (p *Publisher) ResolveConflict(ctx context.Context, tenantID, specValueID uuid.UUID, keepValueID uuid.UUID) error {
+func (p *Publisher) ResolveConflict(_ context.Context, _ uuid.UUID, specValueID uuid.UUID, keepValueID uuid.UUID) error {
 	p.logger.Info().
 		Str("spec_value_id", specValueID.String()).
 		Str("keep_value_id", keepValueID.String()).
@@ -308,9 +308,11 @@ func (p *Publisher) ValidateForPublish(ctx context.Context, tenantID, campaignID
 
 	// Check for minimum content
 	// TODO: Query for minimum spec values, features, etc.
+	// tenantID and campaignID will be used when implementing minimum content check
 
 	// Check for required fields
 	// TODO: Verify required metadata is present
+	// campaignID will be used when implementing required fields check
 
 	return issues, nil
 }

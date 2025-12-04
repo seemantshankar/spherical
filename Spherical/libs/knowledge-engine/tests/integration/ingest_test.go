@@ -3,17 +3,23 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/embedding"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/ingest"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/monitoring"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/observability"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/retrieval"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/storage"
 )
 
 func TestIngestionPipeline_ParseCamrySample(t *testing.T) {
@@ -86,12 +92,40 @@ func TestIngestionPipeline_FullIngestion(t *testing.T) {
 	}
 
 	logger := observability.DefaultLogger()
-	pipeline := ingest.NewPipeline(logger, ingest.PipelineConfig{
-		ChunkSize:         512,
-		ChunkOverlap:      64,
-		MaxConcurrentJobs: 2,
-		DedupeThreshold:   0.95,
+	
+	// Create in-memory database for testing
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close()
+	
+	// Create repositories
+	repos := storage.NewRepositories(db)
+	
+	// Create mock embedder
+	embClient := embedding.NewMockClient(768)
+	
+	// Create vector adapter
+	vectorAdapter, err := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{
+		Dimension: 768,
 	})
+	require.NoError(t, err)
+	
+	// Create lineage writer
+	lineageWriter := monitoring.NewLineageWriter(logger, repos.Lineage, monitoring.DefaultLineageConfig())
+	
+	pipeline := ingest.NewPipeline(
+		logger,
+		ingest.PipelineConfig{
+			ChunkSize:         512,
+			ChunkOverlap:      64,
+			MaxConcurrentJobs: 2,
+			DedupeThreshold:   0.95,
+		},
+		repos,
+		embClient,
+		vectorAdapter,
+		lineageWriter,
+	)
 
 	// Read sample file
 	samplePath := filepath.Join("..", "..", "testdata", "camry-sample.md")
@@ -122,9 +156,21 @@ func TestIngestionPipeline_DuplicateDetection(t *testing.T) {
 	}
 
 	logger := observability.DefaultLogger()
-	pipeline := ingest.NewPipeline(logger, ingest.PipelineConfig{
-		DedupeThreshold: 0.95,
-	})
+	
+	// Create minimal dependencies for deduplication test
+	embClient := embedding.NewMockClient(768)
+	vectorAdapter, _ := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{Dimension: 768})
+	
+	pipeline := ingest.NewPipeline(
+		logger,
+		ingest.PipelineConfig{
+			DedupeThreshold: 0.95,
+		},
+		nil, // No repos needed for deduplication test
+		embClient,
+		vectorAdapter,
+		nil, // No lineage writer needed
+	)
 
 	content := "Test content for deduplication"
 

@@ -540,6 +540,39 @@ func (r *LineageRepository) GetByResource(ctx context.Context, tenantID uuid.UUI
 	return events, rows.Err()
 }
 
+// SaveLineageEvent saves a single lineage event (implements monitoring.LineageStore).
+func (r *LineageRepository) SaveLineageEvent(ctx context.Context, event *LineageEvent) error {
+	return r.Create(ctx, event)
+}
+
+// BatchSaveLineageEvents saves multiple lineage events (implements monitoring.LineageStore).
+func (r *LineageRepository) BatchSaveLineageEvents(ctx context.Context, events []LineageEvent) error {
+	query := `
+		INSERT INTO lineage_events (id, tenant_id, product_id, campaign_variant_id, resource_type,
+			resource_id, document_source_id, ingestion_job_id, action, payload, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	
+	for _, event := range events {
+		if event.ID == uuid.Nil {
+			event.ID = uuid.New()
+		}
+		if event.OccurredAt.IsZero() {
+			event.OccurredAt = time.Now()
+		}
+		
+		_, err := r.db.ExecContext(ctx, query,
+			event.ID, event.TenantID, event.ProductID, event.CampaignVariantID, event.ResourceType,
+			event.ResourceID, event.DocumentSourceID, event.IngestionJobID, event.Action,
+			event.Payload, event.OccurredAt,
+		)
+		if err != nil {
+			return fmt.Errorf("batch save lineage event %s: %w", event.ID, err)
+		}
+	}
+	return nil
+}
+
 // DriftAlertRepository handles drift alert operations.
 type DriftAlertRepository struct {
 	db DB
@@ -622,29 +655,226 @@ func (r *DriftAlertRepository) Resolve(ctx context.Context, alertID uuid.UUID) e
 	return nil
 }
 
+// DocumentSourceRepository handles document source CRUD operations.
+type DocumentSourceRepository struct {
+	db DB
+}
+
+// NewDocumentSourceRepository creates a new document source repository.
+func NewDocumentSourceRepository(db DB) *DocumentSourceRepository {
+	return &DocumentSourceRepository{db: db}
+}
+
+// Create creates a new document source.
+func (r *DocumentSourceRepository) Create(ctx context.Context, doc *DocumentSource) error {
+	if doc.ID == uuid.Nil {
+		doc.ID = uuid.New()
+	}
+
+	query := `
+		INSERT INTO document_sources (id, tenant_id, product_id, campaign_variant_id,
+			storage_uri, sha256, extractor_version, uploaded_by, uploaded_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+	_, err := r.db.ExecContext(ctx, query,
+		doc.ID, doc.TenantID, doc.ProductID, doc.CampaignVariantID,
+		doc.StorageURI, doc.SHA256, doc.ExtractorVersion, doc.UploadedBy, doc.UploadedAt,
+	)
+	return err
+}
+
+// GetByID retrieves a document source by ID.
+func (r *DocumentSourceRepository) GetByID(ctx context.Context, id uuid.UUID) (*DocumentSource, error) {
+	query := `
+		SELECT id, tenant_id, product_id, campaign_variant_id, storage_uri, sha256,
+			extractor_version, uploaded_by, uploaded_at
+		FROM document_sources WHERE id = $1
+	`
+	doc := &DocumentSource{}
+	err := r.db.QueryRowContext(ctx, query, id).Scan(
+		&doc.ID, &doc.TenantID, &doc.ProductID, &doc.CampaignVariantID,
+		&doc.StorageURI, &doc.SHA256, &doc.ExtractorVersion, &doc.UploadedBy, &doc.UploadedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return doc, err
+}
+
+// SpecCategoryRepository handles spec category CRUD operations.
+type SpecCategoryRepository struct {
+	db DB
+}
+
+// NewSpecCategoryRepository creates a new spec category repository.
+func NewSpecCategoryRepository(db DB) *SpecCategoryRepository {
+	return &SpecCategoryRepository{db: db}
+}
+
+// Create creates a new spec category.
+func (r *SpecCategoryRepository) Create(ctx context.Context, category *SpecCategory) error {
+	if category.ID == uuid.Nil {
+		category.ID = uuid.New()
+	}
+	if category.CreatedAt.IsZero() {
+		category.CreatedAt = time.Now()
+	}
+
+	query := `
+		INSERT INTO spec_categories (id, name, description, display_order, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`
+	_, err := r.db.ExecContext(ctx, query,
+		category.ID, category.Name, category.Description, category.DisplayOrder, category.CreatedAt,
+	)
+	return err
+}
+
+// GetByName retrieves a spec category by name (case-insensitive lookup).
+func (r *SpecCategoryRepository) GetByName(ctx context.Context, name string) (*SpecCategory, error) {
+	query := `
+		SELECT id, name, description, display_order, created_at
+		FROM spec_categories WHERE LOWER(name) = LOWER($1)
+	`
+	category := &SpecCategory{}
+	err := r.db.QueryRowContext(ctx, query, name).Scan(
+		&category.ID, &category.Name, &category.Description, &category.DisplayOrder, &category.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return category, err
+}
+
+// GetOrCreate gets an existing category by name or creates a new one.
+func (r *SpecCategoryRepository) GetOrCreate(ctx context.Context, name string) (*SpecCategory, error) {
+	category, err := r.GetByName(ctx, name)
+	if err == nil {
+		return category, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+
+	// Create new category
+	category = &SpecCategory{
+		Name:         name,
+		DisplayOrder: 0, // Default order
+	}
+	if err := r.Create(ctx, category); err != nil {
+		return nil, err
+	}
+	return category, nil
+}
+
+// SpecItemRepository handles spec item CRUD operations.
+type SpecItemRepository struct {
+	db DB
+}
+
+// NewSpecItemRepository creates a new spec item repository.
+func NewSpecItemRepository(db DB) *SpecItemRepository {
+	return &SpecItemRepository{db: db}
+}
+
+// Create creates a new spec item.
+func (r *SpecItemRepository) Create(ctx context.Context, item *SpecItem) error {
+	if item.ID == uuid.Nil {
+		item.ID = uuid.New()
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now()
+	}
+
+	query := `
+		INSERT INTO spec_items (id, category_id, display_name, unit, data_type, validation_rules, aliases, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	_, err := r.db.ExecContext(ctx, query,
+		item.ID, item.CategoryID, item.DisplayName, item.Unit, item.DataType,
+		item.ValidationRules, item.Aliases, item.CreatedAt,
+	)
+	return err
+}
+
+// GetByCategoryAndName retrieves a spec item by category and display name.
+func (r *SpecItemRepository) GetByCategoryAndName(ctx context.Context, categoryID uuid.UUID, displayName string) (*SpecItem, error) {
+	query := `
+		SELECT id, category_id, display_name, unit, data_type, validation_rules, aliases, created_at
+		FROM spec_items WHERE category_id = $1 AND LOWER(display_name) = LOWER($2)
+	`
+	item := &SpecItem{}
+	err := r.db.QueryRowContext(ctx, query, categoryID, displayName).Scan(
+		&item.ID, &item.CategoryID, &item.DisplayName, &item.Unit, &item.DataType,
+		&item.ValidationRules, &item.Aliases, &item.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return item, err
+}
+
+// GetOrCreate gets an existing spec item or creates a new one.
+func (r *SpecItemRepository) GetOrCreate(ctx context.Context, categoryID uuid.UUID, displayName string, unit *string) (*SpecItem, error) {
+	item, err := r.GetByCategoryAndName(ctx, categoryID, displayName)
+	if err == nil {
+		return item, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+
+	// Create new spec item
+	dataType := "text"
+	if unit != nil {
+		// If unit suggests numeric, use numeric type
+		if *unit != "" {
+			dataType = "numeric"
+		}
+	}
+
+	item = &SpecItem{
+		CategoryID:  categoryID,
+		DisplayName: displayName,
+		Unit:        unit,
+		DataType:    dataType,
+		Aliases:     []string{},
+	}
+	if err := r.Create(ctx, item); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
 // Repositories bundles all repositories together.
 type Repositories struct {
-	Tenants        *TenantRepository
-	Products       *ProductRepository
-	Campaigns      *CampaignRepository
-	SpecValues     *SpecValueRepository
-	FeatureBlocks  *FeatureBlockRepository
+	Tenants         *TenantRepository
+	Products        *ProductRepository
+	Campaigns       *CampaignRepository
+	DocumentSources *DocumentSourceRepository
+	SpecCategories  *SpecCategoryRepository
+	SpecItems       *SpecItemRepository
+	SpecValues      *SpecValueRepository
+	FeatureBlocks   *FeatureBlockRepository
 	KnowledgeChunks *KnowledgeChunkRepository
-	Lineage        *LineageRepository
-	DriftAlerts    *DriftAlertRepository
+	Lineage         *LineageRepository
+	DriftAlerts     *DriftAlertRepository
 }
 
 // NewRepositories creates all repositories with the given database connection.
 func NewRepositories(db DB) *Repositories {
 	return &Repositories{
-		Tenants:        NewTenantRepository(db),
-		Products:       NewProductRepository(db),
-		Campaigns:      NewCampaignRepository(db),
-		SpecValues:     NewSpecValueRepository(db),
-		FeatureBlocks:  NewFeatureBlockRepository(db),
+		Tenants:         NewTenantRepository(db),
+		Products:        NewProductRepository(db),
+		Campaigns:       NewCampaignRepository(db),
+		DocumentSources: NewDocumentSourceRepository(db),
+		SpecCategories:  NewSpecCategoryRepository(db),
+		SpecItems:       NewSpecItemRepository(db),
+		SpecValues:      NewSpecValueRepository(db),
+		FeatureBlocks:   NewFeatureBlockRepository(db),
 		KnowledgeChunks: NewKnowledgeChunkRepository(db),
-		Lineage:        NewLineageRepository(db),
-		DriftAlerts:    NewDriftAlertRepository(db),
+		Lineage:         NewLineageRepository(db),
+		DriftAlerts:     NewDriftAlertRepository(db),
 	}
 }
 

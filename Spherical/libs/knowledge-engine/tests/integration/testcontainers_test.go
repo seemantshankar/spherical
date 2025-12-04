@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -16,6 +17,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	_ "github.com/lib/pq"
+	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/storage"
 )
 
 // TestContainerSetup represents the test container infrastructure.
@@ -275,5 +277,55 @@ func isDockerAvailable() bool {
 
 	_, err = provider.Client().Ping(ctx)
 	return err == nil
+}
+
+// Helper functions for creating test data
+
+// createTestTenant creates a test tenant in the database.
+func createTestTenant(t *testing.T, ctx context.Context, db *sql.DB, tenantID uuid.UUID) error {
+	t.Helper()
+	query := `
+		INSERT INTO tenants (id, name, plan_tier, settings, created_at, updated_at)
+		VALUES ($1, 'Test Tenant', 'pro', '{}', NOW(), NOW())
+	`
+	_, err := db.ExecContext(ctx, query, tenantID)
+	return err
+}
+
+// createTestProduct creates a test product in the database.
+func createTestProduct(t *testing.T, ctx context.Context, db *sql.DB, tenantID, productID uuid.UUID) error {
+	t.Helper()
+	query := `
+		INSERT INTO products (id, tenant_id, name, metadata, created_at, updated_at)
+		VALUES ($1, $2, 'Test Product', '{}', NOW(), NOW())
+	`
+	_, err := db.ExecContext(ctx, query, productID, tenantID)
+	return err
+}
+
+// createTestCampaign creates a test campaign variant in the database.
+func createTestCampaign(t *testing.T, ctx context.Context, db *sql.DB, tenantID, productID, campaignID uuid.UUID) error {
+	t.Helper()
+	query := `
+		INSERT INTO campaign_variants (id, tenant_id, product_id, locale, status, version, is_draft, created_at, updated_at)
+		VALUES ($1, $2, $3, 'en-US', 'published', 1, false, NOW(), NOW())
+	`
+	_, err := db.ExecContext(ctx, query, campaignID, tenantID, productID)
+	return err
+}
+
+// testComparisonStore is a test implementation of ComparisonStore.
+type testComparisonStore struct {
+	repos *storage.Repositories
+}
+
+func (s *testComparisonStore) GetComparison(ctx context.Context, tenantID, primaryID, secondaryID uuid.UUID) ([]storage.ComparisonRow, error) {
+	// TODO: Implement when ComparisonRepository is available
+	return nil, nil
+}
+
+func (s *testComparisonStore) SaveComparison(ctx context.Context, rows []storage.ComparisonRow) error {
+	// TODO: Implement when ComparisonRepository is available
+	return nil
 }
 

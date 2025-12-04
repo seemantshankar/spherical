@@ -294,7 +294,7 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 
 		// Try 5-column format first (new format with Variant Availability)
 		matches5 := tableRow5Re.FindStringSubmatch(line)
-		if matches5 != nil && len(matches5) >= 6 {
+		if len(matches5) >= 6 {
 			category = strings.TrimSpace(matches5[1])
 			name = strings.TrimSpace(matches5[2])
 			value = strings.TrimSpace(matches5[3])
@@ -304,7 +304,7 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 		} else {
 			// Try 4-column format (legacy: Category | Specification | Value | Unit)
 			matches4 := tableRow4Re.FindStringSubmatch(line)
-			if matches4 != nil && len(matches4) >= 5 {
+			if len(matches4) >= 5 {
 				category = strings.TrimSpace(matches4[1])
 				name = strings.TrimSpace(matches4[2])
 				value = strings.TrimSpace(matches4[3])
@@ -314,7 +314,7 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 			} else {
 				// Try 3-column format (legacy: Category | Specification | Value)
 				matches3 := tableRow3Re.FindStringSubmatch(line)
-				if matches3 == nil || len(matches3) < 4 {
+				if len(matches3) < 4 {
 					continue
 				}
 				category = strings.TrimSpace(matches3[1])

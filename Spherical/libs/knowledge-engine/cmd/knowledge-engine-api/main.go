@@ -53,7 +53,7 @@ func main() {
 	}
 
 	// Initialize router with all handlers
-	router := NewRouter(logger, appCfg)
+	router := NewRouter(logger, appCfg, cfg)
 
 	// Create server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

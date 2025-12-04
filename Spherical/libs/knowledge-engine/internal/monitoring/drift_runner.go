@@ -158,13 +158,13 @@ func (d *DriftRunner) checkHashMismatches(ctx context.Context, tenantID uuid.UUI
 
 // checkEmbeddingDrift finds campaigns with mixed embedding versions.
 func (d *DriftRunner) checkEmbeddingDrift(ctx context.Context, tenantID uuid.UUID) ([]EmbeddingDrift, error) {
-	// TODO: Implement actual database query
-	// SELECT campaign_variant_id, array_agg(DISTINCT embedding_version) as versions, count(*) as chunks
-	// FROM knowledge_chunks
-	// WHERE tenant_id = $1
-	// GROUP BY campaign_variant_id
-	// HAVING count(DISTINCT embedding_version) > 1
-
+	// TODO: Use EmbeddingGuard to check for mismatches
+	// This requires:
+	// 1. EmbeddingGuard instance with current model/version configuration
+	// 2. Database connection passed to guard
+	// 3. Integration with drift runner configuration
+	
+	// Placeholder implementation - will be completed when EmbeddingGuard is integrated
 	return nil, nil
 }
 
