@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,6 +38,7 @@ type PipelineConfig struct {
 	ChunkOverlap      int
 	DedupeThreshold   float64
 	MaxConcurrentJobs int
+	EmbeddingBatchSize int // Batch size for embedding generation (default: 75)
 }
 
 // IngestionRequest represents a request to ingest a brochure.
@@ -543,20 +545,75 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 	}
 
 	// Batch generate embeddings if embedder is available
+	// Process in batches of 50-100 chunks for better performance and error handling
+	batchSize := p.config.EmbeddingBatchSize
+	if batchSize <= 0 {
+		batchSize = 75 // Default batch size
+	}
+	if batchSize < 50 {
+		batchSize = 50 // Minimum batch size
+	}
+	if batchSize > 100 {
+		batchSize = 100 // Maximum batch size
+	}
+
 	var embeddings [][]float32
+	embeddingErrors := make(map[int]error) // Track which chunks failed
+	
 	if p.embedder != nil && len(chunks) > 0 {
 		texts := make([]string, len(chunks))
 		for i, chunk := range chunks {
 			texts[i] = chunk.Text
 		}
 
-		var err error
-		embeddings, err = p.embedder.Embed(ctx, texts)
-		if err != nil {
-			p.logger.Warn().
-				Err(err).
-				Int("chunk_count", len(chunks)).
-				Msg("Failed to generate embeddings, storing chunks without embeddings")
+		// Try batch embedding if embedder supports it (type assertion to Client or MockClient)
+		if embedClient, ok := p.embedder.(*embedding.Client); ok {
+			// Use EmbedBatch for better batch processing
+			var err error
+			embeddings, err = embedClient.EmbedBatch(ctx, texts, batchSize)
+			if err != nil {
+				p.logger.Warn().
+					Err(err).
+					Int("chunk_count", len(chunks)).
+					Int("batch_size", batchSize).
+					Msg("Batch embedding failed, falling back to individual chunk processing")
+				
+				// Fallback to individual chunk embedding
+				embeddings = make([][]float32, len(chunks))
+				for i, text := range texts {
+					emb, err := embedClient.EmbedSingle(ctx, text)
+					if err != nil {
+						embeddingErrors[i] = err
+						p.logger.Warn().
+							Err(err).
+							Int("chunk_index", i).
+							Str("chunk_text_preview", truncateString(text, 50)).
+							Msg("Failed to generate embedding for individual chunk")
+					} else {
+						embeddings[i] = emb
+					}
+				}
+			}
+		} else if mockClient, ok := p.embedder.(*embedding.MockClient); ok {
+			// MockClient also supports batch via Embed method (process all at once for testing)
+			var err error
+			embeddings, err = mockClient.Embed(ctx, texts)
+			if err != nil {
+				p.logger.Warn().
+					Err(err).
+					Int("chunk_count", len(chunks)).
+					Msg("Mock embedder failed, storing chunks without embeddings")
+			}
+		} else {
+			// Fallback to regular Embed method for other embedders
+			var err error
+			embeddings, err = p.embedder.Embed(ctx, texts)
+			if err != nil {
+				p.logger.Warn().
+					Err(err).
+					Int("chunk_count", len(chunks)).
+					Msg("Failed to generate embeddings, storing chunks without embeddings")
+			}
 		}
 	}
 
@@ -570,6 +627,131 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 	var vectorEntries []retrieval.VectorEntry
 
 	for i, chunk := range chunks {
+		// Extract content_hash from metadata if present (for row chunks)
+		var contentHash *string
+		if chunk.Metadata != nil {
+			if hashVal, ok := chunk.Metadata["content_hash"].(string); ok && hashVal != "" {
+				contentHash = &hashVal
+			}
+		}
+		
+		// For row chunks with content_hash, check for existing chunk (deduplication)
+		var existingChunk *storage.KnowledgeChunk
+		if contentHash != nil && chunk.ChunkType == storage.ChunkTypeSpecRow {
+			existing, err := p.repos.KnowledgeChunks.FindByContentHash(ctx, req.TenantID, *contentHash)
+			if err == nil && existing != nil {
+				existingChunk = existing
+				p.logger.Debug().
+					Str("content_hash", *contentHash).
+					Str("existing_chunk_id", existingChunk.ID.String()).
+					Msg("Found existing chunk with same content hash")
+			}
+		}
+		
+		// Serialize metadata to JSON and add parsed_spec_ids for row chunks
+		var metadataJSON json.RawMessage
+		metadataMap := make(map[string]interface{})
+		if chunk.Metadata != nil {
+			// Copy existing metadata
+			for k, v := range chunk.Metadata {
+				metadataMap[k] = v
+			}
+		}
+		
+		// For row chunks, ensure parsed_spec_ids array exists
+		if chunk.ChunkType == storage.ChunkTypeSpecRow {
+			var parsedSpecIDs []string
+			if existingIDs, ok := metadataMap["parsed_spec_ids"].([]string); ok {
+				parsedSpecIDs = existingIDs
+			} else if existingIDs, ok := metadataMap["parsed_spec_ids"].([]interface{}); ok {
+				for _, id := range existingIDs {
+					if idStr, ok := id.(string); ok {
+						parsedSpecIDs = append(parsedSpecIDs, idStr)
+					}
+				}
+			}
+			// Add current docSourceID
+			docSourceIDStr := docSourceID.String()
+			found := false
+			for _, id := range parsedSpecIDs {
+				if id == docSourceIDStr {
+					found = true
+					break
+				}
+			}
+			if !found {
+				parsedSpecIDs = append(parsedSpecIDs, docSourceIDStr)
+			}
+			metadataMap["parsed_spec_ids"] = parsedSpecIDs
+		}
+		
+		metadataBytes, err := json.Marshal(metadataMap)
+		if err != nil {
+			p.logger.Warn().
+				Err(err).
+				Msg("Failed to serialize chunk metadata")
+			metadataJSON = json.RawMessage("{}")
+		} else {
+			metadataJSON = json.RawMessage(metadataBytes)
+		}
+		
+		// If existing chunk found, update metadata with parsed_spec_ids instead of creating new
+		if existingChunk != nil {
+			// Parse existing metadata
+			var existingMetadata map[string]interface{}
+			if len(existingChunk.Metadata) > 0 {
+				if err := json.Unmarshal(existingChunk.Metadata, &existingMetadata); err != nil {
+					existingMetadata = make(map[string]interface{})
+				}
+			} else {
+				existingMetadata = make(map[string]interface{})
+			}
+			
+			// Get parsed_spec_ids from existing metadata
+			var parsedSpecIDs []string
+			if ids, ok := existingMetadata["parsed_spec_ids"].([]interface{}); ok {
+				for _, id := range ids {
+					if idStr, ok := id.(string); ok {
+						parsedSpecIDs = append(parsedSpecIDs, idStr)
+					}
+				}
+			} else if ids, ok := existingMetadata["parsed_spec_ids"].([]string); ok {
+				parsedSpecIDs = ids
+			}
+			
+			// Add current docSourceID if not already present
+			docSourceIDStr := docSourceID.String()
+			found := false
+			for _, id := range parsedSpecIDs {
+				if id == docSourceIDStr {
+					found = true
+					break
+				}
+			}
+			if !found {
+				parsedSpecIDs = append(parsedSpecIDs, docSourceIDStr)
+			}
+			
+			// Update metadata
+			existingMetadata["parsed_spec_ids"] = parsedSpecIDs
+			updatedMetadata, err := json.Marshal(existingMetadata)
+			if err == nil {
+				if err := p.repos.KnowledgeChunks.UpdateChunkMetadata(ctx, existingChunk.ID, json.RawMessage(updatedMetadata)); err != nil {
+					p.logger.Warn().
+						Err(err).
+						Str("chunk_id", existingChunk.ID.String()).
+						Msg("Failed to update existing chunk metadata")
+				} else {
+					p.logger.Debug().
+						Str("chunk_id", existingChunk.ID.String()).
+						Msg("Updated existing chunk metadata with new parsed_spec_id")
+					created++ // Count as processed
+				}
+			}
+			continue // Skip creating new chunk
+		}
+		
+		// Create new chunk
 		knowledgeChunk := &storage.KnowledgeChunk{
 			ID:                uuid.New(),
 			TenantID:          req.TenantID,
@@ -577,16 +759,34 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			CampaignVariantID: &req.CampaignID,
 			ChunkType:         chunk.ChunkType,
 			Text:              chunk.Text,
+			Metadata:          metadataJSON,
+			ContentHash:       contentHash,
 			SourceDocID:       &docSourceID,
 			SourcePage:        &chunk.StartLine,
 			Visibility:        storage.VisibilityPrivate,
 		}
 
-		// Set embedding if available
-		if i < len(embeddings) && len(embeddings[i]) > 0 {
+		// Set embedding if available, handle errors per chunk
+		if err, hasError := embeddingErrors[i]; hasError {
+			// Chunk failed embedding generation
+			knowledgeChunk.CompletionStatus = "incomplete"
+			p.logger.Warn().
+				Err(err).
+				Str("chunk_id", knowledgeChunk.ID.String()).
+				Str("chunk_type", string(chunk.ChunkType)).
+				Msg("Chunk embedding failed, storing as incomplete")
+		} else if i < len(embeddings) && len(embeddings[i]) > 0 {
+			// Chunk has successful embedding
 			knowledgeChunk.EmbeddingVector = embeddings[i]
 			knowledgeChunk.EmbeddingModel = &embeddingModel
 			knowledgeChunk.EmbeddingVersion = &embeddingVersion
+			knowledgeChunk.CompletionStatus = "complete"
+		} else {
+			// No embedding available (batch failed or not generated)
+			knowledgeChunk.CompletionStatus = "incomplete"
+			p.logger.Debug().
+				Str("chunk_id", knowledgeChunk.ID.String()).
+				Msg("Chunk stored without embedding, marked as incomplete")
 		}
 
 		// Persist to database
@@ -691,4 +891,12 @@ func (p *Pipeline) Deduplicate(content string, threshold float64) (bool, string,
 	// For now, return false (not a duplicate)
 
 	return false, hashHex, nil
+}
+
+// truncateString truncates a string to a maximum length for logging.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

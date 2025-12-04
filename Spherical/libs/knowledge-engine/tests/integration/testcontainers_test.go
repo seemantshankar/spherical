@@ -139,12 +139,20 @@ func (s *TestContainerSetup) RunMigrations(t *testing.T) {
 	_, err = db.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS vector")
 	require.NoError(t, err)
 
-	// Read and execute migration file
-	migrationPath := "../../db/migrations/0001_init.sql"
-	migration, err := os.ReadFile(migrationPath)
+	// Read and execute migration files
+	migration1Path := "../../db/migrations/0001_init.sql"
+	migration1, err := os.ReadFile(migration1Path)
 	require.NoError(t, err)
 
-	_, err = db.ExecContext(ctx, string(migration))
+	_, err = db.ExecContext(ctx, string(migration1))
+	require.NoError(t, err)
+
+	// Apply row chunking migration
+	migration2Path := "../../db/migrations/0002_add_row_chunking_fields.sql"
+	migration2, err := os.ReadFile(migration2Path)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, string(migration2))
 	require.NoError(t, err)
 
 	t.Log("Migrations applied successfully")

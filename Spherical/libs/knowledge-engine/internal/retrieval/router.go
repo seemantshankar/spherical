@@ -42,8 +42,9 @@ type RetrievalRequest struct {
 
 // RetrievalFilters holds filtering options.
 type RetrievalFilters struct {
-	Categories []string
-	ChunkTypes []storage.ChunkType
+	Categories        []string
+	ChunkTypes        []storage.ChunkType
+	SpecificationType *string // Filter by specification_type for row chunks
 }
 
 // ConversationMessage represents a conversation turn.
@@ -76,13 +77,16 @@ type SpecFact struct {
 
 // SemanticChunk represents a retrieved semantic chunk.
 type SemanticChunk struct {
-	ChunkID   uuid.UUID
-	ChunkType storage.ChunkType
-	Text      string
-	Distance  float32
-	Score     float32
-	Metadata  map[string]interface{}
-	Source    SourceRef
+	ChunkID          uuid.UUID
+	ChunkType        storage.ChunkType
+	Text             string
+	Distance         float32
+	Score            float32
+	Metadata         map[string]interface{}
+	Source           SourceRef
+	ParentCategory   string // For hierarchical grouping display
+	SubCategory      string // For hierarchical grouping display
+	SpecificationType string // For filtering
 }
 
 // SourceRef contains source document reference.
@@ -683,7 +687,7 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 		maxChunksToReturn = 3 // Very strict limit if best match is poor
 	}
 	
-	for _, result := range results {
+		for _, result := range results {
 		// Filter by minimum score threshold
 		if result.Score >= minScore {
 			chunk := SemanticChunk{
@@ -693,25 +697,59 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 				Score:     result.Score,
 				Metadata:  result.Metadata,
 			}
-			// Extract chunk type from metadata if available
+			// Extract chunk type and text from metadata if available
 			if result.Metadata != nil {
 				if ct, ok := result.Metadata["chunk_type"].(string); ok {
 					chunk.ChunkType = storage.ChunkType(ct)
 				}
-				// Additional text-based relevance check using chunk text
-				if chunkText, ok := result.Metadata["text"].(string); ok && len(queryKeywords) > 0 {
-					chunkTextLower := strings.ToLower(chunkText)
-					// Check if any keywords appear in the chunk text
-					hasKeywordMatch := false
-					for _, kw := range queryKeywords {
-						if strings.Contains(chunkTextLower, strings.ToLower(kw)) {
-							hasKeywordMatch = true
-							break
+				// Extract text from metadata for display
+				if chunkText, ok := result.Metadata["text"].(string); ok {
+					chunk.Text = chunkText
+					// Additional text-based relevance check using chunk text
+					if len(queryKeywords) > 0 {
+						chunkTextLower := strings.ToLower(chunkText)
+						// Check if any keywords appear in the chunk text
+						hasKeywordMatch := false
+						for _, kw := range queryKeywords {
+							if strings.Contains(chunkTextLower, strings.ToLower(kw)) {
+								hasKeywordMatch = true
+								break
+							}
+						}
+						// If no keyword match and score is mediocre, skip it
+						if !hasKeywordMatch && result.Score < 0.5 {
+							continue
 						}
 					}
-					// If no keyword match and score is mediocre, skip it
-					if !hasKeywordMatch && result.Score < 0.5 {
-						continue
+				}
+				// Extract source document info from metadata
+				if sourceDocStr, ok := result.Metadata["source_doc"].(string); ok && sourceDocStr != "" {
+					if sourceDocID, err := uuid.Parse(sourceDocStr); err == nil {
+						chunk.Source.DocumentSourceID = &sourceDocID
+					}
+				}
+				
+				// Extract category metadata for spec_row chunks
+				if chunk.ChunkType == storage.ChunkTypeSpecRow {
+					if pc, ok := result.Metadata["parent_category"].(string); ok {
+						chunk.ParentCategory = pc
+					}
+					if sc, ok := result.Metadata["sub_category"].(string); ok {
+						chunk.SubCategory = sc
+					}
+					if st, ok := result.Metadata["specification_type"].(string); ok {
+						chunk.SpecificationType = st
+					}
+					
+					// Extract parsed_spec_ids for source references
+					if psids, ok := result.Metadata["parsed_spec_ids"].([]interface{}); ok {
+						// Store in metadata for reference
+						chunk.Metadata["parsed_spec_ids"] = psids
+					}
+					
+					// Apply specification type filtering if requested
+					if req.Filters.SpecificationType != nil && chunk.SpecificationType != *req.Filters.SpecificationType {
+						continue // Skip chunks that don't match specification type filter
 					}
 				}
 			}
@@ -730,7 +768,187 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 		Float64("min_score", float64(minScore)).
 		Msg("Filtered semantic chunks by relevance")
 
+	// Apply hierarchical grouping for spec_row chunks
+	if len(filteredChunks) > 0 {
+		// Check if any chunks are spec_row type
+		hasSpecRows := false
+		for _, chunk := range filteredChunks {
+			if chunk.ChunkType == storage.ChunkTypeSpecRow {
+				hasSpecRows = true
+				break
+			}
+		}
+		
+		if hasSpecRows {
+			// Group spec_row chunks hierarchically
+			groupedChunks := r.groupChunksByCategory(filteredChunks)
+			return groupedChunks, nil
+		}
+	}
+
 	return filteredChunks, nil
+}
+
+// groupChunksByCategory groups chunks hierarchically by parent_category then sub_category.
+// Returns chunks in grouped order: parent categories first, then sub-categories within each parent.
+func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
+	// Separate spec_row chunks from other chunks
+	var specRowChunks []SemanticChunk
+	var otherChunks []SemanticChunk
+	
+	for _, chunk := range chunks {
+		if chunk.ChunkType == storage.ChunkTypeSpecRow {
+			specRowChunks = append(specRowChunks, chunk)
+		} else {
+			otherChunks = append(otherChunks, chunk)
+		}
+	}
+	
+	if len(specRowChunks) == 0 {
+		return chunks // No spec_row chunks, return as-is
+	}
+	
+	// Build hierarchical structure: parent_category -> sub_category -> chunks
+	type SubCategoryGroup struct {
+		SubCategory string
+		Chunks      []SemanticChunk
+	}
+	type ParentCategoryGroup struct {
+		ParentCategory string
+		SubCategories  []SubCategoryGroup
+	}
+	
+	parentMap := make(map[string]*ParentCategoryGroup)
+	
+	// Group chunks by category
+	for _, chunk := range specRowChunks {
+		metadata := extractChunkMetadata(chunk)
+		parentCategory := metadata.ParentCategory
+		subCategory := metadata.SubCategory
+		
+		// Use defaults if empty
+		if parentCategory == "" {
+			parentCategory = "Uncategorized"
+		}
+		if subCategory == "" {
+			subCategory = "General"
+		}
+		
+		// Get or create parent category group
+		parentGroup, exists := parentMap[parentCategory]
+		if !exists {
+			parentGroup = &ParentCategoryGroup{
+				ParentCategory: parentCategory,
+				SubCategories:  make([]SubCategoryGroup, 0),
+			}
+			parentMap[parentCategory] = parentGroup
+		}
+		
+		// Find or create sub-category group
+		subGroupIdx := -1
+		for i, sg := range parentGroup.SubCategories {
+			if sg.SubCategory == subCategory {
+				subGroupIdx = i
+				break
+			}
+		}
+		if subGroupIdx == -1 {
+			parentGroup.SubCategories = append(parentGroup.SubCategories, SubCategoryGroup{
+				SubCategory: subCategory,
+				Chunks:      make([]SemanticChunk, 0),
+			})
+			subGroupIdx = len(parentGroup.SubCategories) - 1
+		}
+		
+		// Add chunk to sub-category group
+		parentGroup.SubCategories[subGroupIdx].Chunks = append(parentGroup.SubCategories[subGroupIdx].Chunks, chunk)
+	}
+	
+	// Flatten hierarchical structure into ordered list
+	// Order: parent categories alphabetically, then sub-categories within each parent, then chunks
+	var groupedChunks []SemanticChunk
+	
+	// Sort parent categories
+	parentCategories := make([]string, 0, len(parentMap))
+	for pc := range parentMap {
+		parentCategories = append(parentCategories, pc)
+	}
+	// Simple alphabetical sort
+	for i := 0; i < len(parentCategories)-1; i++ {
+		for j := i + 1; j < len(parentCategories); j++ {
+			if parentCategories[i] > parentCategories[j] {
+				parentCategories[i], parentCategories[j] = parentCategories[j], parentCategories[i]
+			}
+		}
+	}
+	
+	// Build grouped list
+	for _, parentCategory := range parentCategories {
+		parentGroup := parentMap[parentCategory]
+		
+		// Sort sub-categories
+		for i := 0; i < len(parentGroup.SubCategories)-1; i++ {
+			for j := i + 1; j < len(parentGroup.SubCategories); j++ {
+				if parentGroup.SubCategories[i].SubCategory > parentGroup.SubCategories[j].SubCategory {
+					parentGroup.SubCategories[i], parentGroup.SubCategories[j] = parentGroup.SubCategories[j], parentGroup.SubCategories[i]
+				}
+			}
+		}
+		
+		// Add chunks from each sub-category
+		for _, subGroup := range parentGroup.SubCategories {
+			groupedChunks = append(groupedChunks, subGroup.Chunks...)
+		}
+	}
+	
+	// Append other chunks at the end
+	groupedChunks = append(groupedChunks, otherChunks...)
+	
+	return groupedChunks
+}
+
+// ChunkMetadata holds extracted metadata from a chunk.
+type ChunkMetadata struct {
+	ParentCategory    string
+	SubCategory       string
+	SpecificationType string
+	Value             string
+	AdditionalMetadata string
+	ParsedSpecIDs     []string
+}
+
+// extractChunkMetadata extracts metadata from a SemanticChunk.
+func extractChunkMetadata(chunk SemanticChunk) ChunkMetadata {
+	metadata := ChunkMetadata{}
+	
+	if chunk.Metadata != nil {
+		if pc, ok := chunk.Metadata["parent_category"].(string); ok {
+			metadata.ParentCategory = pc
+		}
+		if sc, ok := chunk.Metadata["sub_category"].(string); ok {
+			metadata.SubCategory = sc
+		}
+		if st, ok := chunk.Metadata["specification_type"].(string); ok {
+			metadata.SpecificationType = st
+		}
+		if v, ok := chunk.Metadata["value"].(string); ok {
+			metadata.Value = v
+		}
+		if am, ok := chunk.Metadata["additional_metadata"].(string); ok {
+			metadata.AdditionalMetadata = am
+		}
+		if psids, ok := chunk.Metadata["parsed_spec_ids"].([]interface{}); ok {
+			for _, id := range psids {
+				if idStr, ok := id.(string); ok {
+					metadata.ParsedSpecIDs = append(metadata.ParsedSpecIDs, idStr)
+				}
+			}
+		} else if psids, ok := chunk.Metadata["parsed_spec_ids"].([]string); ok {
+			metadata.ParsedSpecIDs = psids
+		}
+	}
+	
+	return metadata
 }
 
 // queryComparisons retrieves pre-computed comparison rows.
@@ -1736,7 +1954,9 @@ func (r *Router) extractKeywords(query string) []string {
 		"it": true, "its": true,
 		// Generic words that appear in too many specs
 		"system": true, "systems": true, "type": true, "types": true,
-		"feature": true, "features": true, "size": true, "sizes": true,
+		// Note: "feature" and "features" are NOT stop words - they're meaningful query terms
+		// when users specifically ask for features (e.g., "What are the key features?")
+		"size": true, "sizes": true,
 	}
 
 	// British to American spelling normalization map

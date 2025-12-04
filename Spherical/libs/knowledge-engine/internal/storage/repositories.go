@@ -4,8 +4,12 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -365,6 +369,18 @@ func (r *FeatureBlockRepository) Create(ctx context.Context, block *FeatureBlock
 	block.CreatedAt = time.Now()
 	block.UpdatedAt = time.Now()
 
+	// Serialize tags to JSON for SQLite storage
+	var tagsJSON string
+	if len(block.Tags) > 0 {
+		tagsBytes, err := json.Marshal(block.Tags)
+		if err != nil {
+			return fmt.Errorf("failed to serialize tags: %w", err)
+		}
+		tagsJSON = string(tagsBytes)
+	} else {
+		tagsJSON = "[]"
+	}
+
 	query := `
 		INSERT INTO feature_blocks (id, tenant_id, product_id, campaign_variant_id, block_type,
 			body, priority, tags, shareability, source_doc_id, source_page, created_at, updated_at)
@@ -372,7 +388,7 @@ func (r *FeatureBlockRepository) Create(ctx context.Context, block *FeatureBlock
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		block.ID, block.TenantID, block.ProductID, block.CampaignVariantID, block.BlockType,
-		block.Body, block.Priority, block.Tags, block.Shareability,
+		block.Body, block.Priority, tagsJSON, block.Shareability,
 		block.SourceDocID, block.SourcePage, block.CreatedAt, block.UpdatedAt,
 	)
 	return err
@@ -404,12 +420,43 @@ func (r *FeatureBlockRepository) GetByCampaign(ctx context.Context, tenantID, ca
 	var blocks []*FeatureBlock
 	for rows.Next() {
 		block := &FeatureBlock{}
+		// Tags are stored as JSON TEXT in SQLite, so scan as string first
+		var tagsJSON string
+		var createdAtStr, updatedAtStr string
 		if err := rows.Scan(
 			&block.ID, &block.TenantID, &block.ProductID, &block.CampaignVariantID, &block.BlockType,
-			&block.Body, &block.Priority, &block.Tags, &block.Shareability,
-			&block.SourceDocID, &block.SourcePage, &block.CreatedAt, &block.UpdatedAt,
+			&block.Body, &block.Priority, &tagsJSON, &block.Shareability,
+			&block.SourceDocID, &block.SourcePage, &createdAtStr, &updatedAtStr,
 		); err != nil {
 			return nil, err
+		}
+		// Deserialize tags from JSON
+		if tagsJSON != "" && tagsJSON != "[]" {
+			if err := json.Unmarshal([]byte(tagsJSON), &block.Tags); err != nil {
+				// If deserialization fails, use empty slice
+				block.Tags = []string{}
+			}
+		} else {
+			block.Tags = []string{}
+		}
+		// Parse date strings to time.Time
+		if createdAtStr != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05", createdAtStr); err == nil {
+				block.CreatedAt = t
+			} else if t, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+				block.CreatedAt = t
+			} else {
+				block.CreatedAt = time.Now()
+			}
+		}
+		if updatedAtStr != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05", updatedAtStr); err == nil {
+				block.UpdatedAt = t
+			} else if t, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+				block.UpdatedAt = t
+			} else {
+				block.UpdatedAt = time.Now()
+			}
 		}
 		blocks = append(blocks, block)
 	}
@@ -434,18 +481,163 @@ func (r *KnowledgeChunkRepository) Create(ctx context.Context, chunk *KnowledgeC
 	chunk.CreatedAt = time.Now()
 	chunk.UpdatedAt = time.Now()
 
+	// Serialize embedding vector to JSON BLOB if present
+	var embeddingBlob []byte
+	if len(chunk.EmbeddingVector) > 0 {
+		// Convert []float32 to []float64 for JSON serialization (JSON doesn't have float32)
+		floats64 := make([]float64, len(chunk.EmbeddingVector))
+		for i, f := range chunk.EmbeddingVector {
+			floats64[i] = float64(f)
+		}
+		var err error
+		embeddingBlob, err = json.Marshal(floats64)
+		if err != nil {
+			return fmt.Errorf("failed to serialize embedding vector: %w", err)
+		}
+	}
+
 	query := `
 		INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, chunk_type,
-			text, metadata, embedding_model, embedding_version, source_doc_id, source_page,
+			text, metadata, content_hash, completion_status, embedding_vector, embedding_model, embedding_version, source_doc_id, source_page,
 			visibility, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
+	
+	// Set default completion_status if not set
+	if chunk.CompletionStatus == "" {
+		if len(chunk.EmbeddingVector) > 0 {
+			chunk.CompletionStatus = "complete"
+		} else {
+			chunk.CompletionStatus = "incomplete"
+		}
+	}
+	
 	_, err := r.db.ExecContext(ctx, query,
 		chunk.ID, chunk.TenantID, chunk.ProductID, chunk.CampaignVariantID, chunk.ChunkType,
-		chunk.Text, chunk.Metadata, chunk.EmbeddingModel, chunk.EmbeddingVersion,
+		chunk.Text, chunk.Metadata, chunk.ContentHash, chunk.CompletionStatus, embeddingBlob, chunk.EmbeddingModel, chunk.EmbeddingVersion,
 		chunk.SourceDocID, chunk.SourcePage, chunk.Visibility, chunk.CreatedAt, chunk.UpdatedAt,
 	)
 	return err
+}
+
+// FindByContentHash finds a chunk by content hash for deduplication lookups.
+func (r *KnowledgeChunkRepository) FindByContentHash(ctx context.Context, tenantID uuid.UUID, contentHash string) (*KnowledgeChunk, error) {
+	query := `
+		SELECT id, tenant_id, product_id, campaign_variant_id, chunk_type,
+			text, metadata, content_hash, completion_status, embedding_vector, embedding_model, embedding_version,
+			source_doc_id, source_page, visibility, created_at, updated_at
+		FROM knowledge_chunks
+		WHERE tenant_id = $1 AND content_hash = $2
+		LIMIT 1
+	`
+	
+	chunk := &KnowledgeChunk{}
+	var embeddingBlob []byte
+	var metadataBlob sql.NullString
+	var contentHashPtr sql.NullString
+	
+	err := r.db.QueryRowContext(ctx, query, tenantID, contentHash).Scan(
+		&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.ChunkType,
+		&chunk.Text, &metadataBlob, &contentHashPtr, &chunk.CompletionStatus, &embeddingBlob,
+		&chunk.EmbeddingModel, &chunk.EmbeddingVersion, &chunk.SourceDocID, &chunk.SourcePage,
+		&chunk.Visibility, &chunk.CreatedAt, &chunk.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	
+	// Handle NULL metadata
+	if metadataBlob.Valid && len(metadataBlob.String) > 0 {
+		chunk.Metadata = json.RawMessage(metadataBlob.String)
+	} else {
+		chunk.Metadata = json.RawMessage("{}")
+	}
+	
+	// Handle NULL content_hash
+	if contentHashPtr.Valid {
+		chunk.ContentHash = &contentHashPtr.String
+	}
+	
+	// Convert BLOB to []float32
+	if len(embeddingBlob) > 0 {
+		chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
+	}
+	
+	return chunk, nil
+}
+
+// UpdateChunkMetadata updates the metadata of an existing chunk, appending to parsed_spec_ids array.
+func (r *KnowledgeChunkRepository) UpdateChunkMetadata(ctx context.Context, chunkID uuid.UUID, metadata json.RawMessage) error {
+	query := `
+		UPDATE knowledge_chunks
+		SET metadata = $1, updated_at = $2
+		WHERE id = $3
+	`
+	_, err := r.db.ExecContext(ctx, query, metadata, time.Now(), chunkID)
+	return err
+}
+
+// FindIncompleteChunks finds chunks with completion_status='incomplete' for retry processing.
+func (r *KnowledgeChunkRepository) FindIncompleteChunks(ctx context.Context, tenantID uuid.UUID, limit int) ([]*KnowledgeChunk, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	
+	query := `
+		SELECT id, tenant_id, product_id, campaign_variant_id, chunk_type,
+			text, metadata, content_hash, completion_status, embedding_vector, embedding_model, embedding_version,
+			source_doc_id, source_page, visibility, created_at, updated_at
+		FROM knowledge_chunks
+		WHERE tenant_id = $1 AND completion_status != 'complete'
+		ORDER BY created_at ASC
+		LIMIT $2
+	`
+	
+	rows, err := r.db.QueryContext(ctx, query, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var chunks []*KnowledgeChunk
+	for rows.Next() {
+		chunk := &KnowledgeChunk{}
+		var embeddingBlob []byte
+		var metadataBlob sql.NullString
+		var contentHashPtr sql.NullString
+		
+		if err := rows.Scan(
+			&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.ChunkType,
+			&chunk.Text, &metadataBlob, &contentHashPtr, &chunk.CompletionStatus, &embeddingBlob,
+			&chunk.EmbeddingModel, &chunk.EmbeddingVersion, &chunk.SourceDocID, &chunk.SourcePage,
+			&chunk.Visibility, &chunk.CreatedAt, &chunk.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		
+		// Handle NULL metadata
+		if metadataBlob.Valid && len(metadataBlob.String) > 0 {
+			chunk.Metadata = json.RawMessage(metadataBlob.String)
+		} else {
+			chunk.Metadata = json.RawMessage("{}")
+		}
+		
+		// Handle NULL content_hash
+		if contentHashPtr.Valid {
+			chunk.ContentHash = &contentHashPtr.String
+		}
+		
+		// Convert BLOB to []float32
+		if len(embeddingBlob) > 0 {
+			chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
+		}
+		
+		chunks = append(chunks, chunk)
+	}
+	return chunks, rows.Err()
 }
 
 // GetByCampaign retrieves all chunks for a campaign.
@@ -476,6 +668,129 @@ func (r *KnowledgeChunkRepository) GetByCampaign(ctx context.Context, tenantID, 
 		chunks = append(chunks, chunk)
 	}
 	return chunks, rows.Err()
+}
+
+// GetWithEmbeddingsByTenantAndProducts retrieves chunks with embeddings for a tenant and optional products.
+// This is used to load vectors into the FAISS adapter for querying.
+func (r *KnowledgeChunkRepository) GetWithEmbeddingsByTenantAndProducts(ctx context.Context, tenantID uuid.UUID, productIDs []uuid.UUID) ([]*KnowledgeChunk, error) {
+	var query string
+	var args []interface{}
+	
+	if len(productIDs) == 0 {
+		// Get all chunks for tenant
+		query = `
+			SELECT id, tenant_id, product_id, campaign_variant_id, chunk_type,
+				text, metadata, embedding_vector, embedding_model, embedding_version, 
+				source_doc_id, source_page, visibility, created_at, updated_at
+			FROM knowledge_chunks
+			WHERE tenant_id = $1 
+				AND embedding_vector IS NOT NULL 
+				AND LENGTH(embedding_vector) > 0
+		`
+		args = []interface{}{tenantID}
+	} else {
+		// Get chunks for specific products
+		query = `
+			SELECT id, tenant_id, product_id, campaign_variant_id, chunk_type,
+				text, metadata, embedding_vector, embedding_model, embedding_version,
+				source_doc_id, source_page, visibility, created_at, updated_at
+			FROM knowledge_chunks
+			WHERE tenant_id = $1 
+				AND product_id IN (` + buildInClause(len(productIDs)) + `)
+				AND embedding_vector IS NOT NULL 
+				AND LENGTH(embedding_vector) > 0
+		`
+		args = make([]interface{}, 1+len(productIDs))
+		args[0] = tenantID
+		for i, pid := range productIDs {
+			args[i+1] = pid
+		}
+	}
+	
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []*KnowledgeChunk
+	for rows.Next() {
+		chunk := &KnowledgeChunk{}
+		var embeddingBlob []byte
+		var metadataBlob sql.NullString // Handle NULL metadata
+		
+		if err := rows.Scan(
+			&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.ChunkType,
+			&chunk.Text, &metadataBlob, &embeddingBlob, &chunk.EmbeddingModel, &chunk.EmbeddingVersion,
+			&chunk.SourceDocID, &chunk.SourcePage, &chunk.Visibility, &chunk.CreatedAt, &chunk.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		
+		// Handle NULL metadata
+		if metadataBlob.Valid && len(metadataBlob.String) > 0 {
+			chunk.Metadata = json.RawMessage(metadataBlob.String)
+		} else {
+			chunk.Metadata = json.RawMessage("{}") // Default to empty JSON object
+		}
+		
+		// Convert BLOB to []float32
+		if len(embeddingBlob) > 0 {
+			chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
+		}
+		
+		chunks = append(chunks, chunk)
+	}
+	return chunks, rows.Err()
+}
+
+// buildInClause builds a parameterized IN clause string.
+func buildInClause(count int) string {
+	if count == 0 {
+		return ""
+	}
+	parts := make([]string, count)
+	for i := 0; i < count; i++ {
+		parts[i] = fmt.Sprintf("$%d", i+2) // Start from $2 since $1 is tenant_id
+	}
+	return strings.Join(parts, ", ")
+}
+
+// blobToFloat32Slice converts a BLOB (byte array) to []float32.
+// The BLOB is expected to be a JSON array of floats or binary encoded floats.
+func blobToFloat32Slice(blob []byte) []float32 {
+	if len(blob) == 0 {
+		return nil
+	}
+	
+	// Try JSON first (most common format)
+	var floats []float32
+	if err := json.Unmarshal(blob, &floats); err == nil {
+		return floats
+	}
+	
+	// Try JSON with float64 and convert
+	var floats64 []float64
+	if err := json.Unmarshal(blob, &floats64); err == nil {
+		floats = make([]float32, len(floats64))
+		for i, f := range floats64 {
+			floats[i] = float32(f)
+		}
+		return floats
+	}
+	
+	// If JSON fails, try binary format (4 bytes per float32)
+	if len(blob)%4 == 0 {
+		floats = make([]float32, len(blob)/4)
+		for i := 0; i < len(floats); i++ {
+			// Read 4 bytes as float32 (little-endian)
+			bits := binary.LittleEndian.Uint32(blob[i*4 : (i+1)*4])
+			floats[i] = math.Float32frombits(bits)
+		}
+		return floats
+	}
+	
+	return nil
 }
 
 // LineageRepository handles lineage event operations.
@@ -737,13 +1052,40 @@ func (r *SpecCategoryRepository) GetByName(ctx context.Context, name string) (*S
 		FROM spec_categories WHERE LOWER(name) = LOWER($1)
 	`
 	category := &SpecCategory{}
+	// SQLite stores dates as TEXT, so we need to scan as string and parse
+	var createdAtStr string
 	err := r.db.QueryRowContext(ctx, query, name).Scan(
-		&category.ID, &category.Name, &category.Description, &category.DisplayOrder, &category.CreatedAt,
+		&category.ID, &category.Name, &category.Description, &category.DisplayOrder, &createdAtStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return category, err
+	if err != nil {
+		return nil, err
+	}
+	// Parse the TEXT date string to time.Time
+	if createdAtStr != "" {
+		// Try multiple date formats
+		formats := []string{
+			time.RFC3339,
+			time.RFC3339Nano,
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05",
+		}
+		parsed := false
+		for _, format := range formats {
+			if t, err := time.Parse(format, createdAtStr); err == nil {
+				category.CreatedAt = t
+				parsed = true
+				break
+			}
+		}
+		if !parsed {
+			// If parsing fails, use current time as fallback
+			category.CreatedAt = time.Now()
+		}
+	}
+	return category, nil
 }
 
 // GetOrCreate gets an existing category by name or creates a new one.
@@ -786,13 +1128,25 @@ func (r *SpecItemRepository) Create(ctx context.Context, item *SpecItem) error {
 		item.CreatedAt = time.Now()
 	}
 
+	// Serialize aliases to JSON for SQLite storage
+	var aliasesJSON string
+	if len(item.Aliases) > 0 {
+		aliasesBytes, err := json.Marshal(item.Aliases)
+		if err != nil {
+			return fmt.Errorf("failed to serialize aliases: %w", err)
+		}
+		aliasesJSON = string(aliasesBytes)
+	} else {
+		aliasesJSON = "[]"
+	}
+
 	query := `
 		INSERT INTO spec_items (id, category_id, display_name, unit, data_type, validation_rules, aliases, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		item.ID, item.CategoryID, item.DisplayName, item.Unit, item.DataType,
-		item.ValidationRules, item.Aliases, item.CreatedAt,
+		item.ValidationRules, aliasesJSON, item.CreatedAt,
 	)
 	return err
 }

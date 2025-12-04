@@ -114,11 +114,12 @@ type RetrievalConfig struct {
 
 // IngestionConfig holds ingestion pipeline settings.
 type IngestionConfig struct {
-	PDFExtractorPath  string  `yaml:"pdf_extractor_path"`
-	MaxConcurrentJobs int     `yaml:"max_concurrent_jobs"`
-	ChunkSize         int     `yaml:"chunk_size"`
-	ChunkOverlap      int     `yaml:"chunk_overlap"`
-	DedupeThreshold   float64 `yaml:"dedupe_threshold"`
+	PDFExtractorPath   string  `yaml:"pdf_extractor_path"`
+	MaxConcurrentJobs  int     `yaml:"max_concurrent_jobs"`
+	ChunkSize          int     `yaml:"chunk_size"`
+	ChunkOverlap       int     `yaml:"chunk_overlap"`
+	DedupeThreshold    float64 `yaml:"dedupe_threshold"`
+	EmbeddingBatchSize int     `yaml:"embedding_batch_size"`
 }
 
 // ComparisonConfig holds comparison service settings.
@@ -259,11 +260,12 @@ func DefaultConfig() *Config {
 			CacheResults:               true,
 		},
 		Ingestion: IngestionConfig{
-			PDFExtractorPath:  "../pdf-extractor/cmd/pdf-extractor",
-			MaxConcurrentJobs: 2,
-			ChunkSize:         512,
-			ChunkOverlap:      64,
-			DedupeThreshold:   0.95,
+			PDFExtractorPath:   "../pdf-extractor/cmd/pdf-extractor",
+			MaxConcurrentJobs:  2,
+			ChunkSize:          512,
+			ChunkOverlap:       64,
+			DedupeThreshold:    0.95,
+			EmbeddingBatchSize: 75, // Default batch size for embedding generation
 		},
 		Comparison: ComparisonConfig{
 			MaxDimensions:   20,

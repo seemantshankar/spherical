@@ -2,6 +2,8 @@
 package ingest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -145,17 +147,64 @@ func (p *Parser) Parse(content string) (*ParsedBrochure, error) {
 	specs := p.parseSpecTables(remaining)
 	result.SpecValues = specs
 
+	// Generate row-level chunks from tables (one chunk per table row)
+	// Process each page separately to maintain source page references
+	for pageNum, pageContent := range pages {
+		rowChunks := p.generateRowChunks(pageContent, pageNum)
+		result.RawChunks = append(result.RawChunks, rowChunks...)
+	}
+
 	// Parse feature lists
 	features := p.parseFeatures(remaining)
 	result.Features = features
+	
+	// Convert features to chunks for querying
+	for _, feature := range features {
+		// Add "Key Feature" prefix to chunk text so queries for "feature" or "key feature" can find these chunks
+		// This makes the chunks searchable without query-type-specific logic
+		featureText := fmt.Sprintf("Key Feature: %s", feature.Body)
+		featureChunk := ParsedChunk{
+			Text:      featureText,
+			ChunkType: storage.ChunkTypeGlobal, // Use global type for features
+			SourcePage: 0, // Features don't have specific page numbers
+			StartLine: 0,
+			EndLine:   0,
+			Metadata: map[string]interface{}{
+				"type": "feature",
+				"tags": feature.Tags,
+			},
+		}
+		result.RawChunks = append(result.RawChunks, featureChunk)
+	}
 
 	// Parse USPs
 	usps := p.parseUSPs(remaining)
 	result.USPs = usps
+	
+	// Convert USPs to chunks for querying
+	for _, usp := range usps {
+		// Add "USP" prefix to chunk text so queries for "USP" can find these chunks
+		// This makes the chunks searchable by the keyword "USP" without query-type-specific logic
+		uspText := fmt.Sprintf("USP: %s", usp.Body)
+		uspChunk := ParsedChunk{
+			Text:      uspText,
+			ChunkType: storage.ChunkTypeGlobal, // Use global type for USPs
+			SourcePage: 0, // USPs don't have specific page numbers
+			StartLine: 0,
+			EndLine:   0,
+			Metadata: map[string]interface{}{
+				"type":     "usp",
+				"priority": usp.Priority,
+				"tags":     usp.Tags,
+			},
+		}
+		result.RawChunks = append(result.RawChunks, uspChunk)
+	}
 
-	// Generate chunks for semantic search
+	// Generate chunks for semantic search (paragraph-based for non-table content)
+	// Note: This preserves existing paragraph chunking for prose content
 	chunks := p.generateChunks(remaining)
-	result.RawChunks = chunks
+	result.RawChunks = append(result.RawChunks, chunks...)
 
 	return result, nil
 }
@@ -267,6 +316,7 @@ func (p *Parser) splitByPages(content string) map[int]string {
 }
 
 // parseSpecTables extracts specifications from Markdown tables.
+// For 5-column tables, columns are: Parent Category, Sub-Category, Specification, Value, Additional metadata
 func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 	var specs []ParsedSpec
 
@@ -292,14 +342,23 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 
 		var category, name, value, unit, keyFeatures, variantAvailability string
 
-		// Try 5-column format first (new format with Variant Availability)
+		// Try 5-column format first (new format: Parent Category | Sub-Category | Specification | Value | Additional metadata)
 		matches5 := tableRow5Re.FindStringSubmatch(line)
 		if len(matches5) >= 6 {
-			category = strings.TrimSpace(matches5[1])
-			name = strings.TrimSpace(matches5[2])
-			value = strings.TrimSpace(matches5[3])
-			keyFeatures = strings.TrimSpace(matches5[4])
-			variantAvailability = strings.TrimSpace(matches5[5])
+			// For 5-column tables: Column 1 = Parent Category, Column 2 = Sub-Category
+			parentCategory := strings.TrimSpace(matches5[1])
+			subCategory := strings.TrimSpace(matches5[2])
+			name = strings.TrimSpace(matches5[3])
+			value = strings.TrimSpace(matches5[4])
+			additionalMetadata := strings.TrimSpace(matches5[5])
+			
+			// Use parent category as category for ParsedSpec (backward compatibility)
+			category = parentCategory
+			if category == "" {
+				category = subCategory
+			}
+			keyFeatures = additionalMetadata
+			variantAvailability = ""
 			unit = "" // Unit extracted from value if numeric
 		} else {
 			// Try 4-column format (legacy: Category | Specification | Value | Unit)
@@ -771,5 +830,253 @@ func GenerateSpecID(tenantID, productID uuid.UUID, category, name string) uuid.U
 	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // DNS namespace
 	data := fmt.Sprintf("%s:%s:%s:%s", tenantID, productID, category, name)
 	return uuid.NewSHA1(namespace, []byte(data))
+}
+
+// computeContentHash generates SHA-256 hash of normalized structured text.
+// This is used for content-based deduplication of table row chunks.
+func computeContentHash(text string) string {
+	// Normalize: trim whitespace and normalize line endings
+	normalized := strings.TrimSpace(text)
+	normalized = strings.ReplaceAll(normalized, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	// Normalize multiple spaces to single space
+	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+	
+	// Compute SHA-256 hash
+	hash := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(hash[:])
+}
+
+// formatRowChunkText formats a table row as structured text (key-value pairs).
+// Format: "Category: {parent}\nSub-Category: {sub}\nSpecification: {spec}\nValue: {value}\nAdditional Metadata: {meta}"
+func formatRowChunkText(parentCategory, subCategory, specificationType, value, additionalMetadata string) string {
+	var parts []string
+	
+	if parentCategory != "" {
+		parts = append(parts, fmt.Sprintf("Category: %s", strings.TrimSpace(parentCategory)))
+	}
+	if subCategory != "" {
+		parts = append(parts, fmt.Sprintf("Sub-Category: %s", strings.TrimSpace(subCategory)))
+	}
+	if specificationType != "" {
+		parts = append(parts, fmt.Sprintf("Specification: %s", strings.TrimSpace(specificationType)))
+	}
+	if value != "" {
+		parts = append(parts, fmt.Sprintf("Value: %s", strings.TrimSpace(value)))
+	}
+	if additionalMetadata != "" {
+		parts = append(parts, fmt.Sprintf("Additional Metadata: %s", strings.TrimSpace(additionalMetadata)))
+	}
+	
+	return strings.Join(parts, "\n")
+}
+
+// extractTableRowMetadata extracts all 5 columns and builds metadata JSON structure.
+// Returns a map with parent_category, sub_category, specification_type, value, additional_metadata, and table_column_N fields.
+func extractTableRowMetadata(parentCategory, subCategory, specificationType, value, additionalMetadata string) map[string]interface{} {
+	metadata := make(map[string]interface{})
+	
+	// Use default values for empty fields
+	if parentCategory == "" {
+		parentCategory = "Uncategorized"
+	}
+	if subCategory == "" {
+		subCategory = "General"
+	}
+	if specificationType == "" {
+		specificationType = "Unknown"
+	}
+	
+	metadata["parent_category"] = strings.TrimSpace(parentCategory)
+	metadata["sub_category"] = strings.TrimSpace(subCategory)
+	metadata["specification_type"] = strings.TrimSpace(specificationType)
+	metadata["value"] = strings.TrimSpace(value)
+	if additionalMetadata != "" {
+		metadata["additional_metadata"] = strings.TrimSpace(additionalMetadata)
+	}
+	
+	// Store raw column values for reference
+	metadata["table_column_1"] = strings.TrimSpace(parentCategory)
+	metadata["table_column_2"] = strings.TrimSpace(subCategory)
+	metadata["table_column_3"] = strings.TrimSpace(specificationType)
+	metadata["table_column_4"] = strings.TrimSpace(value)
+	metadata["table_column_5"] = strings.TrimSpace(additionalMetadata)
+	
+	return metadata
+}
+
+// generateRowChunks converts table rows to ParsedChunk with chunk_type='spec_row'.
+// This function processes tables and generates one chunk per row.
+func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk {
+	var chunks []ParsedChunk
+	
+	// Match 5-column tables: | Parent Category | Sub-Category | Specification | Value | Additional metadata |
+	tableRow5Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
+	// Match 4-column tables: | Category | Specification | Value | Unit |
+	tableRow4Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
+	// Match 3-column tables: | Category | Specification | Value |
+	tableRow3Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
+	
+	lines := strings.Split(content, "\n")
+	lineNum := 0
+	
+	for _, line := range lines {
+		lineNum++
+		line = strings.TrimSpace(line)
+		
+		// Skip header/separator rows
+		if strings.Contains(line, "---") || strings.Contains(line, "===") {
+			continue
+		}
+		
+		var parentCategory, subCategory, specificationType, value, additionalMetadata string
+		var isTableRow bool
+		
+		// Try 5-column format first
+		matches5 := tableRow5Re.FindStringSubmatch(line)
+		if len(matches5) >= 6 {
+			col1 := strings.TrimSpace(matches5[1])
+			col2 := strings.TrimSpace(matches5[2])
+			col3 := strings.TrimSpace(matches5[3])
+			col4 := strings.TrimSpace(matches5[4])
+			col5 := strings.TrimSpace(matches5[5])
+			
+			// Detect table format by checking if col2 looks like a specification name or a value
+			// Format 1: | Parent Category | Sub-Category | Specification | Value | Additional |
+			// Format 2: | Category | Specification | Value | Key Features | Variant Availability |
+			// Format 3: | Category | Specification | Value | | Additional |
+			
+			// Check if this is Format 2 or 3 (Category | Specification | Value | ...)
+			// In these formats, col2 is the specification name, col3 is the value
+			// Format 2: | Category | Specification | Value | Key Features | Variant Availability |
+			// Format 3: | Category | Specification | Value | | Additional |
+			// Format 4: | Category | Specification | | | Variant Availability | (value empty, use specification as value)
+			
+			// Detect Format 2/3/4: If col3 looks like a value (not empty and not a header), or if col3 is empty but col2 is a specification
+			// Key indicator: col2 is the specification name, not a sub-category
+			if col2 != "" && (col3 != "" || (col3 == "" && col4 == "" && col5 != "")) {
+				// Check if col2 looks like a specification name (not a sub-category)
+				// Specifications are usually longer, more descriptive, or contain specific keywords
+				isSpecificationName := len(col2) > 5 || 
+					strings.Contains(strings.ToLower(col2), "color") ||
+					strings.Contains(strings.ToLower(col2), "carplay") ||
+					strings.Contains(strings.ToLower(col2), "android") ||
+					strings.Contains(strings.ToLower(col2), "bluetooth") ||
+					strings.Contains(strings.ToLower(col2), "speaker") ||
+					strings.Contains(strings.ToLower(col2), "system") ||
+					strings.Contains(strings.ToLower(col2), "feature") ||
+					!strings.Contains(col2, ">") // Sub-categories often have ">" separator
+				
+				if isSpecificationName {
+					// Format 2/3/4: Category | Specification | Value | ... |
+					parentCategory = col1
+					subCategory = "General"
+					specificationType = col2
+					if col3 != "" {
+						value = col3
+						additionalMetadata = col5 // Use col5 as additional metadata (Variant Availability)
+					} else {
+						// Format 4: Value is empty, use specification name as value or leave empty
+						// The value will be handled by the empty value logic below
+						value = ""
+						additionalMetadata = col5
+					}
+				} else {
+					// Format 1: Standard 5-column with sub-category
+					parentCategory = col1
+					subCategory = col2
+					specificationType = col3
+					value = col4
+					additionalMetadata = col5
+				}
+			} else {
+				// Format 1: Standard 5-column with sub-category
+				parentCategory = col1
+				subCategory = col2
+				specificationType = col3
+				value = col4
+				additionalMetadata = col5
+			}
+			
+			isTableRow = true
+		} else {
+			// Try 4-column format (only if 5-column didn't match)
+			// Count the number of pipe-separated columns to avoid matching 5-column rows as 4-column
+			pipeCount := strings.Count(line, "|")
+			if pipeCount == 5 { // 4-column table has 5 pipes (including leading and trailing)
+				matches4 := tableRow4Re.FindStringSubmatch(line)
+				if len(matches4) >= 5 {
+					// For 4-column: Column 1 = Category, Column 2 = Specification, Column 3 = Value, Column 4 = Unit
+					parentCategory = strings.TrimSpace(matches4[1])
+					subCategory = "General" // Default for 4-column tables
+					specificationType = strings.TrimSpace(matches4[2])
+					value = strings.TrimSpace(matches4[3])
+					additionalMetadata = strings.TrimSpace(matches4[4]) // Unit goes here
+					isTableRow = true
+				}
+			} else if pipeCount == 4 { // 3-column table has 4 pipes
+				// Try 3-column format
+				matches3 := tableRow3Re.FindStringSubmatch(line)
+				if len(matches3) >= 4 {
+					// For 3-column: Column 1 = Category, Column 2 = Specification, Column 3 = Value
+					parentCategory = strings.TrimSpace(matches3[1])
+					subCategory = "General" // Default for 3-column tables
+					specificationType = strings.TrimSpace(matches3[2])
+					value = strings.TrimSpace(matches3[3])
+					additionalMetadata = ""
+					isTableRow = true
+				}
+			}
+		}
+		
+		// Skip if not a table row or if it's a header row
+		if !isTableRow {
+			continue
+		}
+		
+		// Skip header rows
+		if strings.EqualFold(parentCategory, "category") || 
+		   strings.EqualFold(parentCategory, "parent category") ||
+		   strings.EqualFold(subCategory, "sub-category") ||
+		   strings.EqualFold(specificationType, "specification") ||
+		   strings.EqualFold(specificationType, "spec") ||
+		   strings.EqualFold(value, "value") {
+			continue
+		}
+		
+		// Skip empty rows
+		// Allow rows where value is empty if specificationType exists
+		// Some specifications (like "Apple CarPlay and Android Auto") don't have a value column,
+		// they just indicate availability through variant availability metadata
+		if specificationType == "" {
+			continue
+		}
+		// Keep value empty if it's empty - don't replace it with additionalMetadata
+		// The variant availability in additionalMetadata is separate information
+		
+		// Format structured text
+		structuredText := formatRowChunkText(parentCategory, subCategory, specificationType, value, additionalMetadata)
+		
+		// Generate content hash
+		contentHash := computeContentHash(structuredText)
+		
+		// Extract metadata
+		metadata := extractTableRowMetadata(parentCategory, subCategory, specificationType, value, additionalMetadata)
+		metadata["content_hash"] = contentHash
+		
+		// Create ParsedChunk
+		chunk := ParsedChunk{
+			Text:       structuredText,
+			ChunkType:  storage.ChunkTypeSpecRow,
+			SourcePage: sourcePage,
+			StartLine:  lineNum,
+			EndLine:    lineNum,
+			Metadata:   metadata,
+		}
+		
+		chunks = append(chunks, chunk)
+	}
+	
+	return chunks
 }
 

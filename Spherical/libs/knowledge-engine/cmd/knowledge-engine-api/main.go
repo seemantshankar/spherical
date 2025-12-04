@@ -42,14 +42,15 @@ func main() {
 
 	// Create app config
 	appCfg := &AppConfig{
-		RequestTimeout:     cfg.Server.ReadTimeout,
-		CacheSize:          cfg.Cache.MaxEntries,
-		CacheTTL:           cfg.Cache.TTL,
-		MaxChunks:          cfg.Retrieval.MaxChunks,
-		MaxConcurrentJobs:  cfg.Ingestion.MaxConcurrentJobs,
-		EmbeddingDimension: cfg.Embedding.Dimension,
-		DriftCheckInterval: cfg.Drift.CheckInterval,
-		StalenessWindow:    cfg.Drift.FreshnessThreshold,
+		RequestTimeout:      cfg.Server.ReadTimeout,
+		CacheSize:           cfg.Cache.MaxEntries,
+		CacheTTL:            cfg.Cache.TTL,
+		MaxChunks:           cfg.Retrieval.MaxChunks,
+		MaxConcurrentJobs:   cfg.Ingestion.MaxConcurrentJobs,
+		EmbeddingDimension:  cfg.Embedding.Dimension,
+		EmbeddingBatchSize:  cfg.Ingestion.EmbeddingBatchSize,
+		DriftCheckInterval:  cfg.Drift.CheckInterval,
+		StalenessWindow:     cfg.Drift.FreshnessThreshold,
 	}
 
 	// Initialize router with all handlers

@@ -139,6 +139,12 @@ func NewRouter(logger *observability.Logger, appCfg *AppConfig, engineCfg *confi
 		lineageWriter = monitoring.NewLineageWriter(logger, nil, monitoring.DefaultLineageConfig())
 	}
 
+	// Use provided batch size or default to 75
+	batchSize := appCfg.EmbeddingBatchSize
+	if batchSize <= 0 {
+		batchSize = 75 // Default batch size
+	}
+	
 	pipeline := ingest.NewPipeline(
 		logger,
 		ingest.PipelineConfig{
@@ -146,6 +152,7 @@ func NewRouter(logger *observability.Logger, appCfg *AppConfig, engineCfg *confi
 			ChunkOverlap:      64,
 			MaxConcurrentJobs: appCfg.MaxConcurrentJobs,
 			DedupeThreshold:   0.95,
+			EmbeddingBatchSize: batchSize,
 		},
 		repos,
 		embClient,
@@ -221,15 +228,16 @@ func NewRouter(logger *observability.Logger, appCfg *AppConfig, engineCfg *confi
 
 // AppConfig holds application configuration.
 type AppConfig struct {
-	RequestTimeout     time.Duration
-	CacheSize          int
-	CacheTTL           time.Duration
-	MaxChunks          int
-	MaxConcurrentJobs  int
-	EmbeddingDimension int
-	DriftCheckInterval time.Duration
-	StalenessWindow    time.Duration
-	AuthConfig         middleware.AuthConfig
+	RequestTimeout      time.Duration
+	CacheSize           int
+	CacheTTL            time.Duration
+	MaxChunks           int
+	MaxConcurrentJobs   int
+	EmbeddingDimension  int
+	EmbeddingBatchSize  int
+	DriftCheckInterval  time.Duration
+	StalenessWindow     time.Duration
+	AuthConfig          middleware.AuthConfig
 }
 
 // DefaultAppConfig returns default configuration values.
@@ -241,6 +249,7 @@ func DefaultAppConfig() *AppConfig {
 		MaxChunks:          8,
 		MaxConcurrentJobs:  4,
 		EmbeddingDimension: 768,
+		EmbeddingBatchSize: 75, // Default batch size for embedding generation
 		DriftCheckInterval: 1 * time.Hour,
 		StalenessWindow:    30 * 24 * time.Hour, // 30 days
 		AuthConfig: middleware.AuthConfig{

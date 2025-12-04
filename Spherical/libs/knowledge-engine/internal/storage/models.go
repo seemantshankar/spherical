@@ -249,6 +249,8 @@ type KnowledgeChunk struct {
 	ChunkType         ChunkType       `json:"chunk_type" db:"chunk_type"`
 	Text              string          `json:"text" db:"text"`
 	Metadata          json.RawMessage `json:"metadata" db:"metadata"`
+	ContentHash       *string         `json:"content_hash,omitempty" db:"content_hash"`
+	CompletionStatus  string          `json:"completion_status" db:"completion_status"`
 	EmbeddingVector   []float32       `json:"embedding_vector,omitempty" db:"embedding_vector"`
 	EmbeddingModel    *string         `json:"embedding_model,omitempty" db:"embedding_model"`
 	EmbeddingVersion  *string         `json:"embedding_version,omitempty" db:"embedding_version"`
