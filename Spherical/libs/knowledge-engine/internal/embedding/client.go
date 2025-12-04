@@ -146,6 +146,11 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
+	// Note: We keep the configured model name (c.model) rather than updating it from
+	// the API response model name (embResp.Model) because OpenRouter may return a
+	// different model name in the response even when using the requested model.
+	// The dimension will be updated from the actual response to ensure correctness.
+
 	// Sort by index and extract embeddings
 	embeddings := make([][]float32, len(texts))
 	for _, data := range embResp.Data {

@@ -43,10 +43,10 @@ cache:
     pool_size: 10
 
 embedding:
-  model: "text-embedding-3-small"
+  model: "qwen/qwen3-embedding-8b"
   dimension: 768
   batch_size: 100
-  # API key loaded from OPENAI_API_KEY or OPENROUTER_API_KEY env var
+  # API key loaded from OPENROUTER_API_KEY env var
 
 retrieval:
   max_chunks: 8

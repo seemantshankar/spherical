@@ -157,7 +157,7 @@ func (p *Parser) Parse(content string) (*ParsedBrochure, error) {
 	// Parse feature lists
 	features := p.parseFeatures(remaining)
 	result.Features = features
-	
+
 	// Convert features to chunks for querying
 	for _, feature := range features {
 		// Add "Key Feature" prefix to chunk text so queries for "feature" or "key feature" can find these chunks
@@ -1004,15 +1004,15 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 			// Count the number of pipe-separated columns to avoid matching 5-column rows as 4-column
 			pipeCount := strings.Count(line, "|")
 			if pipeCount == 5 { // 4-column table has 5 pipes (including leading and trailing)
-				matches4 := tableRow4Re.FindStringSubmatch(line)
-				if len(matches4) >= 5 {
-					// For 4-column: Column 1 = Category, Column 2 = Specification, Column 3 = Value, Column 4 = Unit
-					parentCategory = strings.TrimSpace(matches4[1])
-					subCategory = "General" // Default for 4-column tables
-					specificationType = strings.TrimSpace(matches4[2])
-					value = strings.TrimSpace(matches4[3])
-					additionalMetadata = strings.TrimSpace(matches4[4]) // Unit goes here
-					isTableRow = true
+			matches4 := tableRow4Re.FindStringSubmatch(line)
+			if len(matches4) >= 5 {
+				// For 4-column: Column 1 = Category, Column 2 = Specification, Column 3 = Value, Column 4 = Unit
+				parentCategory = strings.TrimSpace(matches4[1])
+				subCategory = "General" // Default for 4-column tables
+				specificationType = strings.TrimSpace(matches4[2])
+				value = strings.TrimSpace(matches4[3])
+				additionalMetadata = strings.TrimSpace(matches4[4]) // Unit goes here
+				isTableRow = true
 				}
 			} else if pipeCount == 4 { // 3-column table has 4 pipes
 				// Try 3-column format

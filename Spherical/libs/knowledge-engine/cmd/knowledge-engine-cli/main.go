@@ -56,6 +56,14 @@ Use this tool to:
 All commands support --json for automation.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		var err error
+		// If no config file specified, try to use dev.yaml as default
+		if cfgFile == "" {
+			// Try to find configs/dev.yaml relative to the binary
+			if _, err := os.Stat("configs/dev.yaml"); err == nil {
+				cfgFile = "configs/dev.yaml"
+			}
+		}
+		
 		cfg, err = config.Load(cfgFile)
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
@@ -200,7 +208,16 @@ the pdf-extractor binary to generate Markdown first.`,
 				return fmt.Errorf("invalid tenant: %w", err)
 			}
 
-			productID, err := resolveID(product)
+			// Open database connection early for product/campaign lookup
+			db, err := openDatabase(cfg)
+			if err != nil {
+				ui.Error("Failed to connect to database: %v", err)
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			// Use resolveProductID to query database for product (ensures consistency with query command)
+			productID, err := resolveProductID(db, product)
 			if err != nil {
 				ui.Error("Invalid product ID: %v", err)
 				return fmt.Errorf("invalid product: %w", err)
@@ -233,14 +250,8 @@ the pdf-extractor binary to generate Markdown first.`,
 				Int("content_size", len(content)).
 				Msg("Starting ingestion")
 
-			// Open database connection
-			ui.Step("Connecting to database")
-			db, err := openDatabase(cfg)
-			if err != nil {
-				ui.Error("Failed to connect to database: %v", err)
-				return fmt.Errorf("open database: %w", err)
-			}
-			defer db.Close()
+			// Database connection already opened above for product lookup
+			ui.Step("Database connected")
 			ui.Success("Database connected")
 
 			// Create repositories
@@ -543,6 +554,7 @@ Results include citations and lineage information.`,
 					return fmt.Errorf("invalid product %s: %w", p, err)
 				}
 				productIDs = append(productIDs, pid)
+				logger.Debug().Str("product_name", p).Str("product_id", pid.String()).Msg("Resolved product ID")
 			}
 
 			logger.Info().
@@ -556,26 +568,7 @@ Results include citations and lineage information.`,
 			// Create spec view repository
 			specViewRepo := storage.NewSpecViewRepository(db)
 
-			// Create embedder (use mock for now, can be enhanced to use real embeddings)
-			var embClient embedding.Embedder
-			apiKey := os.Getenv("OPENROUTER_API_KEY")
-			if apiKey != "" {
-				client, err := embedding.NewClient(embedding.Config{
-					APIKey:  apiKey,
-					Model:   cfg.Embedding.Model,
-					BaseURL: "https://openrouter.ai/api/v1",
-				})
-				if err == nil {
-					embClient = client
-				} else {
-					logger.Warn().Err(err).Msg("Failed to create embedding client, using mock")
-					embClient = embedding.NewMockClient(cfg.Embedding.Dimension)
-				}
-			} else {
-				embClient = embedding.NewMockClient(cfg.Embedding.Dimension)
-			}
-
-			// Create retrieval infrastructure
+			// Create retrieval infrastructure first to detect actual embedding dimension
 			memCache := cache.NewMemoryClient(1000)
 			vectorAdapter, err := retrieval.NewFAISSAdapter(retrieval.FAISSConfig{
 				Dimension: cfg.Embedding.Dimension,
@@ -584,12 +577,56 @@ Results include citations and lineage information.`,
 				return fmt.Errorf("create vector adapter: %w", err)
 			}
 
-			// Load vectors from database into FAISS adapter
+			// Load vectors from database into FAISS adapter to detect actual dimension
 			chunkRepo := storage.NewKnowledgeChunkRepository(db)
 			chunks, err := chunkRepo.GetWithEmbeddingsByTenantAndProducts(ctx, tenantID, productIDs)
-			if err != nil {
+			
+			// Detect actual embedding dimension from stored chunks (before creating embedder)
+			actualDimension := cfg.Embedding.Dimension
+			if err == nil && len(chunks) > 0 {
+				logger.Debug().Int("chunks_found", len(chunks)).Int("product_count", len(productIDs)).Msg("Retrieved chunks with embeddings from database")
+				for _, chunk := range chunks {
+					if len(chunk.EmbeddingVector) > 0 {
+						actualDimension = len(chunk.EmbeddingVector)
+						break
+					}
+				}
+				// Update FAISS adapter dimension to match stored embeddings
+				if actualDimension != cfg.Embedding.Dimension {
+					logger.Debug().Int("config_dimension", cfg.Embedding.Dimension).Int("actual_dimension", actualDimension).Msg("Detected dimension mismatch, updating FAISS adapter")
+					vectorAdapter, err = retrieval.NewFAISSAdapter(retrieval.FAISSConfig{
+						Dimension: actualDimension,
+					})
+					if err != nil {
+						return fmt.Errorf("recreate vector adapter with correct dimension: %w", err)
+					}
+				}
+			} else if err != nil {
 				logger.Warn().Err(err).Msg("Failed to load chunks with embeddings, vector search may return no results")
-			} else if len(chunks) > 0 {
+			}
+			
+			// Create embedder with the actual dimension from stored embeddings (or config default)
+			var embClient embedding.Embedder
+			apiKey := os.Getenv("OPENROUTER_API_KEY")
+			if apiKey != "" {
+				client, err := embedding.NewClient(embedding.Config{
+					APIKey:    apiKey,
+					Model:     cfg.Embedding.Model,
+					Dimension: actualDimension, // Use actual dimension from stored embeddings
+					BaseURL:   "https://openrouter.ai/api/v1",
+				})
+				if err == nil {
+					embClient = client
+				} else {
+					logger.Warn().Err(err).Msg("Failed to create embedding client, using mock")
+					embClient = embedding.NewMockClient(actualDimension)
+				}
+			} else {
+				embClient = embedding.NewMockClient(actualDimension)
+			}
+			
+			// Now load vectors into FAISS adapter
+			if err == nil && len(chunks) > 0 {
 				// Convert chunks to vector entries
 				vectorEntries := make([]retrieval.VectorEntry, 0, len(chunks))
 				for _, chunk := range chunks {
@@ -630,6 +667,8 @@ Results include citations and lineage information.`,
 						logger.Info().Int("vector_count", len(vectorEntries)).Msg("Loaded vectors into FAISS adapter")
 					}
 				}
+			} else if err != nil {
+				logger.Warn().Err(err).Msg("Failed to load chunks with embeddings, vector search may return no results")
 			} else {
 				logger.Debug().Msg("No chunks with embeddings found in database")
 			}
@@ -709,11 +748,16 @@ Results include citations and lineage information.`,
 				
 				// Load full text for chunks returned by router
 				chunkMap := make(map[uuid.UUID]*retrieval.SemanticChunk)
+				// Track original vector search distances to preserve real similarity scores
+				vectorSearchDistances := make(map[uuid.UUID]float32)
 				for i := range resp.SemanticChunks {
 					chunkID := resp.SemanticChunks[i].ChunkID
 					if chunkID == uuid.Nil {
 						continue
 					}
+					
+					// Store original distance from vector search
+					vectorSearchDistances[chunkID] = resp.SemanticChunks[i].Distance
 					
 					// Load full text from database
 					query := `SELECT text FROM knowledge_chunks WHERE id = $1`
@@ -861,11 +905,40 @@ Results include citations and lineage information.`,
 											score = float32(15.0) // Very high score for Key Features and USPs to ensure they appear
 											keyFeatureCount++
 										}
+										
+										// Calculate distance: preserve real vector similarity if available, otherwise calculate from keyword matching
+										var distance float32
+										if originalDistance, exists := vectorSearchDistances[chunkID]; exists {
+											// Chunk was found by vector search - preserve real similarity
+											distance = originalDistance
+										} else {
+											// Chunk found only by keyword search - calculate distance based on keyword matching strength
+											// Count keyword matches in the text
+											fullTextLower := strings.ToLower(fullText)
+											keywordMatches := 0
+											for _, kw := range keywords {
+												if strings.Contains(fullTextLower, strings.ToLower(kw)) {
+													keywordMatches++
+												}
+											}
+											
+											// More keywords matched = better match = lower distance
+											if len(keywords) > 0 {
+												keywordMatchRatio := float32(keywordMatches) / float32(len(keywords))
+												distance = 0.7 - (keywordMatchRatio * 0.4) // Range: 0.3 (all match) to 0.7 (one match)
+												if strings.HasPrefix(fullText, "Key Feature:") || strings.HasPrefix(fullText, "USP:") {
+													distance = 0.4 // Slightly better for Key Features/USPs
+												}
+											} else {
+												distance = 0.5 // Default if no keywords
+											}
+										}
+										
 										newChunk := retrieval.SemanticChunk{
 											ChunkID:   chunkID,
 											ChunkType: storage.ChunkType(chunkTypeStr),
 											Text:      fullText,
-											Distance:  0.3, // Good similarity for keyword match
+											Distance:  distance,
 											Score:     score,
 										}
 										resp.SemanticChunks = append(resp.SemanticChunks, newChunk)
@@ -920,11 +993,27 @@ Results include citations and lineage information.`,
 									
 									// Add chunk if it matches keywords (general approach - works for any query type)
 									if keywordMatches >= 1 {
+										// Calculate distance: preserve real vector similarity if available, otherwise calculate from keyword matching
+										var distance float32
+										if originalDistance, exists := vectorSearchDistances[chunkID]; exists {
+											// Chunk was found by vector search - preserve real similarity
+											distance = originalDistance
+										} else {
+											// Chunk found only by keyword search - calculate distance based on keyword matching strength
+											// More keywords matched = better match = lower distance
+											if len(keywords) > 0 {
+												keywordMatchRatio := float32(keywordMatches) / float32(len(keywords))
+												distance = 0.8 - (keywordMatchRatio * 0.3) // Range: 0.5 (all match) to 0.8 (one match)
+											} else {
+												distance = 0.5 // Default if no keywords
+											}
+										}
+										
 										newChunk := retrieval.SemanticChunk{
 											ChunkID:   chunkID,
 											ChunkType: storage.ChunkTypeGlobal,
 											Text:      fullText,
-											Distance:  0.5, // Neutral distance since we don't have vector similarity
+											Distance:  distance,
 											Score:     0.5,
 										}
 										resp.SemanticChunks = append(resp.SemanticChunks, newChunk)
@@ -1029,6 +1118,18 @@ Results include citations and lineage information.`,
 					
 					// Only include chunks with meaningful scores
 					minScore := 1.0
+					
+					// Calculate similarity from distance (1.0 - distance) * 100
+					similarity := (1.0 - float64(resp.SemanticChunks[i].Distance)) * 100.0
+					
+					// Filter out chunks with low similarity unless they have very high keyword relevance
+					// Chunks with < 50% similarity need to have high keyword match scores to be included
+					if similarity < 50.0 {
+						// For low similarity chunks, require at least 2 keyword matches AND a score > 3.0
+						if keywordMatches < 2 || score < 3.0 {
+							continue // Skip low-relevance chunks
+						}
+					}
 					
 					// REMOVED: All query-type-specific logic (isColorQuery, isFuelEfficiencyQuery, etc.)
 					// The system now works generically using:

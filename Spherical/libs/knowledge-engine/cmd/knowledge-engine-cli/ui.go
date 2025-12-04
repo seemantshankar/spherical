@@ -38,7 +38,7 @@ func (ui *UI) Close() {
 		// Only wait if we're in a terminal (not piped)
 		// When piped, progress bars can't render and Wait() may hang
 		if IsTerminal() {
-			ui.progress.Wait()
+		ui.progress.Wait()
 		} else {
 			// For piped output, shutdown without waiting to avoid hanging
 			// The progress bars won't render anyway when piped

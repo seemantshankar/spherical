@@ -248,7 +248,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Embedding: EmbeddingConfig{
-			Model:     "text-embedding-3-small",
+			Model:     "qwen/qwen3-embedding-8b",
 			Dimension: 768,
 			BatchSize: 100,
 		},

@@ -617,10 +617,19 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 		}
 	}
 
+	// Get model name - use the configured model name, not the API response model name
+	// because OpenRouter may return a different model name in the response even when
+	// using the requested model (as confirmed by dashboard usage logs).
 	embeddingModel := "unknown"
 	embeddingVersion := "1.0"
 	if p.embedder != nil {
+		// Use the model name from the embedder (configured model, not API response)
 		embeddingModel = p.embedder.Model()
+		p.logger.Debug().
+			Str("embedding_model", embeddingModel).
+			Int("chunk_count", len(chunks)).
+			Int("embedding_count", len(embeddings)).
+			Msg("Using embedding model from embedder (configured model name)")
 	}
 
 	// Prepare vector entries for batch insert
