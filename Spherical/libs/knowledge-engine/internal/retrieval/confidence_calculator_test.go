@@ -321,3 +321,5 @@ func TestConfidenceCalculator_MultipleChunksAverage(t *testing.T) {
 	assert.InDelta(t, 0.21, confidence, 0.01, "Should average multiple chunks")
 }
 
+
+

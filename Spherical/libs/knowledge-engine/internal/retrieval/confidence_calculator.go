@@ -125,3 +125,5 @@ func (cc *ConfidenceCalculator) CalculateConfidenceForResponse(resp *RetrievalRe
 	return cc.CalculateOverallConfidence(resp.StructuredFacts, resp.SemanticChunks, keywordConf)
 }
 
+
+

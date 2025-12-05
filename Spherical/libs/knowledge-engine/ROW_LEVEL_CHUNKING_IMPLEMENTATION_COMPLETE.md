@@ -187,3 +187,5 @@ psql -d your_db -f db/migrations/0002_add_row_chunking_fields.sql
 
 The row-level chunking feature is fully implemented and tested! 🎉
 
+
+

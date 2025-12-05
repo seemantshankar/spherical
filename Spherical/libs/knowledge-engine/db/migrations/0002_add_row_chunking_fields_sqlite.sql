@@ -44,3 +44,5 @@ SET completion_status = CASE
 END
 WHERE completion_status IS NULL;
 
+
+

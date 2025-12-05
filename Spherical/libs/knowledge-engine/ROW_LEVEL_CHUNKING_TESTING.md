@@ -240,3 +240,5 @@ ok  	github.com/spherical-ai/spherical/libs/knowledge-engine/internal/ingest	0.6
 
 All tests should pass! ✅
 
+
+
