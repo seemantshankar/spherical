@@ -194,6 +194,23 @@ func TestUnitNormalizer(t *testing.T) {
 	}
 }
 
+func TestBuildSpecFactChunkText(t *testing.T) {
+	spec := ParsedSpec{
+		Category:            "Engine",
+		Name:                "Battery Range",
+		Value:               "300",
+		Unit:                "km",
+		KeyFeatures:         "Fast charge support",
+		VariantAvailability: "Standard",
+	}
+
+	chunk := buildSpecFactChunkText(spec, "Optional gloss text")
+	assert.Contains(t, chunk, "Engine > Battery Range: 300 km")
+	assert.Contains(t, chunk, "Key features: Fast charge support")
+	assert.Contains(t, chunk, "Availability: Standard")
+	assert.Contains(t, chunk, "Gloss: Optional gloss text")
+}
+
 func TestValidateParsedBrochure(t *testing.T) {
 	t.Run("warns on no specs", func(t *testing.T) {
 		parsed := &ParsedBrochure{
@@ -244,4 +261,3 @@ func TestValidateParsedBrochure(t *testing.T) {
 		assert.True(t, found, "Should warn about missing product name")
 	})
 }
-

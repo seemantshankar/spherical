@@ -43,9 +43,9 @@ type RetrievalRequest struct {
 	// New: Structured spec name list from LLM
 	RequestedSpecs []string `json:"requested_specs,omitempty"`
 	// New: Request mode (natural language vs structured)
-	RequestMode    string `json:"request_mode,omitempty"`
+	RequestMode string `json:"request_mode,omitempty"`
 	// New: Include natural language summary
-	IncludeSummary bool   `json:"include_summary,omitempty"`
+	IncludeSummary bool `json:"include_summary,omitempty"`
 }
 
 // RetrievalResponse represents the gRPC response message.
@@ -66,14 +66,18 @@ type RetrievalResponse struct {
 
 // SpecFact represents a structured spec fact in gRPC.
 type SpecFact struct {
-	SpecItemID        string  `json:"spec_item_id"`
-	Category          string  `json:"category"`
-	Name              string  `json:"name"`
-	Value             string  `json:"value"`
-	Unit              string  `json:"unit,omitempty"`
-	Confidence        float64 `json:"confidence"`
-	CampaignVariantID string  `json:"campaign_variant_id"`
-	Source            *Source `json:"source,omitempty"`
+	SpecItemID          string  `json:"spec_item_id"`
+	Category            string  `json:"category"`
+	Name                string  `json:"name"`
+	Value               string  `json:"value"`
+	Unit                string  `json:"unit,omitempty"`
+	KeyFeatures         string  `json:"key_features,omitempty"`
+	VariantAvailability string  `json:"variant_availability,omitempty"`
+	Explanation         string  `json:"explanation,omitempty"`
+	Provenance          string  `json:"provenance,omitempty"`
+	Confidence          float64 `json:"confidence"`
+	CampaignVariantID   string  `json:"campaign_variant_id"`
+	Source              *Source `json:"source,omitempty"`
 }
 
 // Chunk represents a semantic chunk in gRPC.
@@ -115,13 +119,13 @@ type Source struct {
 
 // SpecAvailability represents availability status for a spec in gRPC.
 type SpecAvailability struct {
-	SpecName        string   `json:"spec_name"`
-	Status          string   `json:"status"`
-	Confidence      float64  `json:"confidence"`
+	SpecName         string   `json:"spec_name"`
+	Status           string   `json:"status"`
+	Confidence       float64  `json:"confidence"`
 	AlternativeNames []string `json:"alternative_names,omitempty"`
 	// Include matched specs/chunks if found
-	MatchedSpecs   []*SpecFact `json:"matched_specs,omitempty"`
-	MatchedChunks  []*Chunk    `json:"matched_chunks,omitempty"`
+	MatchedSpecs  []*SpecFact `json:"matched_specs,omitempty"`
+	MatchedChunks []*Chunk    `json:"matched_chunks,omitempty"`
 }
 
 // Query handles gRPC/Connect retrieval queries.
@@ -233,14 +237,18 @@ func (s *RetrievalService) toGRPCResponse(resp *retrieval.RetrievalResponse) *Re
 
 	for _, fact := range resp.StructuredFacts {
 		grpcResp.StructuredFacts = append(grpcResp.StructuredFacts, &SpecFact{
-			SpecItemID:        fact.SpecItemID.String(),
-			Category:          fact.Category,
-			Name:              fact.Name,
-			Value:             fact.Value,
-			Unit:              fact.Unit,
-			Confidence:        fact.Confidence,
-			CampaignVariantID: fact.CampaignVariantID.String(),
-			Source:            s.toGRPCSource(fact.Source),
+			SpecItemID:          fact.SpecItemID.String(),
+			Category:            fact.Category,
+			Name:                fact.Name,
+			Value:               fact.Value,
+			Unit:                fact.Unit,
+			KeyFeatures:         fact.KeyFeatures,
+			VariantAvailability: fact.VariantAvailability,
+			Explanation:         fact.Explanation,
+			Provenance:          fact.Provenance,
+			Confidence:          fact.Confidence,
+			CampaignVariantID:   fact.CampaignVariantID.String(),
+			Source:              s.toGRPCSource(fact.Source),
 		})
 	}
 
@@ -291,9 +299,9 @@ func (s *RetrievalService) toGRPCResponse(resp *retrieval.RetrievalResponse) *Re
 	grpcResp.SpecAvailability = make([]*SpecAvailability, 0, len(resp.SpecAvailability))
 	for _, status := range resp.SpecAvailability {
 		grpcStatus := &SpecAvailability{
-			SpecName:        status.SpecName,
-			Status:          string(status.Status),
-			Confidence:      status.Confidence,
+			SpecName:         status.SpecName,
+			Status:           string(status.Status),
+			Confidence:       status.Confidence,
 			AlternativeNames: status.AlternativeNames,
 		}
 
@@ -301,14 +309,18 @@ func (s *RetrievalService) toGRPCResponse(resp *retrieval.RetrievalResponse) *Re
 		grpcStatus.MatchedSpecs = make([]*SpecFact, 0, len(status.MatchedSpecs))
 		for _, fact := range status.MatchedSpecs {
 			grpcStatus.MatchedSpecs = append(grpcStatus.MatchedSpecs, &SpecFact{
-				SpecItemID:        fact.SpecItemID.String(),
-				Category:          fact.Category,
-				Name:              fact.Name,
-				Value:              fact.Value,
-				Unit:               fact.Unit,
-				Confidence:         fact.Confidence,
-				CampaignVariantID:  fact.CampaignVariantID.String(),
-				Source:             s.toGRPCSource(fact.Source),
+				SpecItemID:          fact.SpecItemID.String(),
+				Category:            fact.Category,
+				Name:                fact.Name,
+				Value:               fact.Value,
+				Unit:                fact.Unit,
+				KeyFeatures:         fact.KeyFeatures,
+				VariantAvailability: fact.VariantAvailability,
+				Explanation:         fact.Explanation,
+				Provenance:          fact.Provenance,
+				Confidence:          fact.Confidence,
+				CampaignVariantID:   fact.CampaignVariantID.String(),
+				Source:              s.toGRPCSource(fact.Source),
 			})
 		}
 
@@ -356,4 +368,3 @@ func (s *RetrievalService) toGRPCSource(src retrieval.SourceRef) *Source {
 	}
 	return grpcSrc
 }
-

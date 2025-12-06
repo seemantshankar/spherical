@@ -102,6 +102,22 @@ func NewProductRepository(db DB) *ProductRepository {
 	return &ProductRepository{db: db}
 }
 
+// parseDBTime parses time strings returned by SQLite (e.g., "2006-01-02 15:04:05") or RFC3339 formats.
+func parseDBTime(s string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999-07:00",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("parse time: %s", s)
+}
+
 // Create creates a new product.
 func (r *ProductRepository) Create(ctx context.Context, product *Product) error {
 	if product.ID == uuid.Nil {
@@ -132,15 +148,25 @@ func (r *ProductRepository) GetByID(ctx context.Context, tenantID, productID uui
 		WHERE id = $1 AND tenant_id = $2
 	`
 	product := &Product{}
+	var createdAtStr, updatedAtStr string
 	err := r.db.QueryRowContext(ctx, query, productID, tenantID).Scan(
 		&product.ID, &product.TenantID, &product.Name, &product.Segment, &product.BodyType,
 		&product.ModelYear, &product.IsPublicBenchmark, &product.DefaultCampaignVariantID,
-		&product.Metadata, &product.CreatedAt, &product.UpdatedAt,
+		&product.Metadata, &createdAtStr, &updatedAtStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return product, err
+	if err != nil {
+		return nil, err
+	}
+	if product.CreatedAt, err = parseDBTime(createdAtStr); err != nil {
+		return nil, err
+	}
+	if product.UpdatedAt, err = parseDBTime(updatedAtStr); err != nil {
+		return nil, err
+	}
+	return product, nil
 }
 
 // ListByTenant lists all products for a tenant.
@@ -161,11 +187,18 @@ func (r *ProductRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID
 	var products []*Product
 	for rows.Next() {
 		product := &Product{}
+		var createdAtStr, updatedAtStr string
 		if err := rows.Scan(
 			&product.ID, &product.TenantID, &product.Name, &product.Segment, &product.BodyType,
 			&product.ModelYear, &product.IsPublicBenchmark, &product.DefaultCampaignVariantID,
-			&product.Metadata, &product.CreatedAt, &product.UpdatedAt,
+			&product.Metadata, &createdAtStr, &updatedAtStr,
 		); err != nil {
+			return nil, err
+		}
+		if product.CreatedAt, err = parseDBTime(createdAtStr); err != nil {
+			return nil, err
+		}
+		if product.UpdatedAt, err = parseDBTime(updatedAtStr); err != nil {
 			return nil, err
 		}
 		products = append(products, product)
@@ -214,16 +247,26 @@ func (r *CampaignRepository) GetByID(ctx context.Context, tenantID, campaignID u
 		WHERE id = $1 AND tenant_id = $2
 	`
 	campaign := &CampaignVariant{}
+	var createdAtStr, updatedAtStr string
 	err := r.db.QueryRowContext(ctx, query, campaignID, tenantID).Scan(
 		&campaign.ID, &campaign.ProductID, &campaign.TenantID, &campaign.Locale,
 		&campaign.Trim, &campaign.Market, &campaign.Status, &campaign.Version,
 		&campaign.EffectiveFrom, &campaign.EffectiveThrough, &campaign.IsDraft,
-		&campaign.LastPublishedBy, &campaign.CreatedAt, &campaign.UpdatedAt,
+		&campaign.LastPublishedBy, &createdAtStr, &updatedAtStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return campaign, err
+	if err != nil {
+		return nil, err
+	}
+	if campaign.CreatedAt, err = parseDBTime(createdAtStr); err != nil {
+		return nil, err
+	}
+	if campaign.UpdatedAt, err = parseDBTime(updatedAtStr); err != nil {
+		return nil, err
+	}
+	return campaign, nil
 }
 
 // Update updates a campaign variant.
@@ -275,14 +318,16 @@ func (r *SpecValueRepository) Create(ctx context.Context, spec *SpecValue) error
 
 	query := `
 		INSERT INTO spec_values (id, tenant_id, product_id, campaign_variant_id, spec_item_id,
-			value_numeric, value_text, unit, confidence, status, source_doc_id, source_page,
+			value_numeric, value_text, unit, key_features, variant_availability, explanation, explanation_failed,
+			confidence, status, source_doc_id, source_page,
 			version, effective_from, effective_through, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+		        $13, $14, $15, $16, $17, $18, $19, $20, $21)
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		spec.ID, spec.TenantID, spec.ProductID, spec.CampaignVariantID, spec.SpecItemID,
-		spec.ValueNumeric, spec.ValueText, spec.Unit, spec.Confidence, spec.Status,
-		spec.SourceDocID, spec.SourcePage, spec.Version, spec.EffectiveFrom, spec.EffectiveThrough,
+		spec.ValueNumeric, spec.ValueText, spec.Unit, spec.KeyFeatures, spec.VariantAvailability, spec.Explanation, spec.ExplanationFailed,
+		spec.Confidence, spec.Status, spec.SourceDocID, spec.SourcePage, spec.Version, spec.EffectiveFrom, spec.EffectiveThrough,
 		spec.CreatedAt, spec.UpdatedAt,
 	)
 	return err
@@ -292,7 +337,8 @@ func (r *SpecValueRepository) Create(ctx context.Context, spec *SpecValue) error
 func (r *SpecValueRepository) GetByCampaign(ctx context.Context, tenantID, campaignID uuid.UUID) ([]*SpecValue, error) {
 	query := `
 		SELECT id, tenant_id, product_id, campaign_variant_id, spec_item_id,
-			value_numeric, value_text, unit, confidence, status, source_doc_id, source_page,
+			value_numeric, value_text, unit, key_features, variant_availability, explanation, explanation_failed,
+			confidence, status, source_doc_id, source_page,
 			version, effective_from, effective_through, created_at, updated_at
 		FROM spec_values
 		WHERE tenant_id = $1 AND campaign_variant_id = $2 AND status = 'active'
@@ -309,7 +355,8 @@ func (r *SpecValueRepository) GetByCampaign(ctx context.Context, tenantID, campa
 		spec := &SpecValue{}
 		if err := rows.Scan(
 			&spec.ID, &spec.TenantID, &spec.ProductID, &spec.CampaignVariantID, &spec.SpecItemID,
-			&spec.ValueNumeric, &spec.ValueText, &spec.Unit, &spec.Confidence, &spec.Status,
+			&spec.ValueNumeric, &spec.ValueText, &spec.Unit, &spec.KeyFeatures, &spec.VariantAvailability, &spec.Explanation, &spec.ExplanationFailed,
+			&spec.Confidence, &spec.Status,
 			&spec.SourceDocID, &spec.SourcePage, &spec.Version, &spec.EffectiveFrom, &spec.EffectiveThrough,
 			&spec.CreatedAt, &spec.UpdatedAt,
 		); err != nil {
@@ -324,7 +371,8 @@ func (r *SpecValueRepository) GetByCampaign(ctx context.Context, tenantID, campa
 func (r *SpecValueRepository) GetConflicts(ctx context.Context, tenantID, campaignID uuid.UUID) ([]*SpecValue, error) {
 	query := `
 		SELECT id, tenant_id, product_id, campaign_variant_id, spec_item_id,
-			value_numeric, value_text, unit, confidence, status, source_doc_id, source_page,
+			value_numeric, value_text, unit, key_features, variant_availability, explanation, explanation_failed,
+			confidence, status, source_doc_id, source_page,
 			version, effective_from, effective_through, created_at, updated_at
 		FROM spec_values
 		WHERE tenant_id = $1 AND campaign_variant_id = $2 AND status = 'conflict'
@@ -340,7 +388,8 @@ func (r *SpecValueRepository) GetConflicts(ctx context.Context, tenantID, campai
 		spec := &SpecValue{}
 		if err := rows.Scan(
 			&spec.ID, &spec.TenantID, &spec.ProductID, &spec.CampaignVariantID, &spec.SpecItemID,
-			&spec.ValueNumeric, &spec.ValueText, &spec.Unit, &spec.Confidence, &spec.Status,
+			&spec.ValueNumeric, &spec.ValueText, &spec.Unit, &spec.KeyFeatures, &spec.VariantAvailability, &spec.Explanation, &spec.ExplanationFailed,
+			&spec.Confidence, &spec.Status,
 			&spec.SourceDocID, &spec.SourcePage, &spec.Version, &spec.EffectiveFrom, &spec.EffectiveThrough,
 			&spec.CreatedAt, &spec.UpdatedAt,
 		); err != nil {
@@ -496,13 +545,6 @@ func (r *KnowledgeChunkRepository) Create(ctx context.Context, chunk *KnowledgeC
 		}
 	}
 
-	query := `
-		INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, chunk_type,
-			text, metadata, content_hash, completion_status, embedding_vector, embedding_model, embedding_version, source_doc_id, source_page,
-			visibility, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-	`
-	
 	// Set default completion_status if not set
 	if chunk.CompletionStatus == "" {
 		if len(chunk.EmbeddingVector) > 0 {
@@ -511,12 +553,53 @@ func (r *KnowledgeChunkRepository) Create(ctx context.Context, chunk *KnowledgeC
 			chunk.CompletionStatus = "incomplete"
 		}
 	}
-	
-	_, err := r.db.ExecContext(ctx, query,
-		chunk.ID, chunk.TenantID, chunk.ProductID, chunk.CampaignVariantID, chunk.ChunkType,
-		chunk.Text, chunk.Metadata, chunk.ContentHash, chunk.CompletionStatus, embeddingBlob, chunk.EmbeddingModel, chunk.EmbeddingVersion,
-		chunk.SourceDocID, chunk.SourcePage, chunk.Visibility, chunk.CreatedAt, chunk.UpdatedAt,
-	)
+
+	// Check if content_hash and completion_status columns exist
+	// SQLite may cache schema, so we check at runtime
+	var hasContentHash, hasCompletionStatus bool
+	checkQuery := "SELECT COUNT(*) FROM pragma_table_info('knowledge_chunks') WHERE name IN ('content_hash', 'completion_status')"
+	var count int
+	if err := r.db.QueryRowContext(ctx, checkQuery).Scan(&count); err == nil {
+		// Check individually
+		var hashCount, statusCount int
+		r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('knowledge_chunks') WHERE name = 'content_hash'").Scan(&hashCount)
+		r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('knowledge_chunks') WHERE name = 'completion_status'").Scan(&statusCount)
+		hasContentHash = hashCount > 0
+		hasCompletionStatus = statusCount > 0
+	}
+
+	var query string
+	var args []interface{}
+
+	if hasContentHash && hasCompletionStatus {
+		// Full query with both columns
+		query = `
+			INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, chunk_type,
+				text, metadata, content_hash, completion_status, embedding_vector, embedding_model, embedding_version, source_doc_id, source_page,
+				visibility, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		`
+		args = []interface{}{
+			chunk.ID, chunk.TenantID, chunk.ProductID, chunk.CampaignVariantID, chunk.ChunkType,
+			chunk.Text, chunk.Metadata, chunk.ContentHash, chunk.CompletionStatus, embeddingBlob, chunk.EmbeddingModel, chunk.EmbeddingVersion,
+			chunk.SourceDocID, chunk.SourcePage, chunk.Visibility, chunk.CreatedAt, chunk.UpdatedAt,
+		}
+	} else {
+		// Fallback query without content_hash and completion_status (for backwards compatibility)
+		query = `
+			INSERT INTO knowledge_chunks (id, tenant_id, product_id, campaign_variant_id, chunk_type,
+				text, metadata, embedding_vector, embedding_model, embedding_version, source_doc_id, source_page,
+				visibility, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		`
+		args = []interface{}{
+			chunk.ID, chunk.TenantID, chunk.ProductID, chunk.CampaignVariantID, chunk.ChunkType,
+			chunk.Text, chunk.Metadata, embeddingBlob, chunk.EmbeddingModel, chunk.EmbeddingVersion,
+			chunk.SourceDocID, chunk.SourcePage, chunk.Visibility, chunk.CreatedAt, chunk.UpdatedAt,
+		}
+	}
+
+	_, err := r.db.ExecContext(ctx, query, args...)
 	return err
 }
 
@@ -530,12 +613,12 @@ func (r *KnowledgeChunkRepository) FindByContentHash(ctx context.Context, tenant
 		WHERE tenant_id = $1 AND content_hash = $2
 		LIMIT 1
 	`
-	
+
 	chunk := &KnowledgeChunk{}
 	var embeddingBlob []byte
 	var metadataBlob sql.NullString
 	var contentHashPtr sql.NullString
-	
+
 	err := r.db.QueryRowContext(ctx, query, tenantID, contentHash).Scan(
 		&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.ChunkType,
 		&chunk.Text, &metadataBlob, &contentHashPtr, &chunk.CompletionStatus, &embeddingBlob,
@@ -548,24 +631,24 @@ func (r *KnowledgeChunkRepository) FindByContentHash(ctx context.Context, tenant
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Handle NULL metadata
 	if metadataBlob.Valid && len(metadataBlob.String) > 0 {
 		chunk.Metadata = json.RawMessage(metadataBlob.String)
 	} else {
 		chunk.Metadata = json.RawMessage("{}")
 	}
-	
+
 	// Handle NULL content_hash
 	if contentHashPtr.Valid {
 		chunk.ContentHash = &contentHashPtr.String
 	}
-	
+
 	// Convert BLOB to []float32
 	if len(embeddingBlob) > 0 {
 		chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
 	}
-	
+
 	return chunk, nil
 }
 
@@ -585,7 +668,7 @@ func (r *KnowledgeChunkRepository) FindIncompleteChunks(ctx context.Context, ten
 	if limit <= 0 {
 		limit = 100
 	}
-	
+
 	query := `
 		SELECT id, tenant_id, product_id, campaign_variant_id, chunk_type,
 			text, metadata, content_hash, completion_status, embedding_vector, embedding_model, embedding_version,
@@ -595,20 +678,20 @@ func (r *KnowledgeChunkRepository) FindIncompleteChunks(ctx context.Context, ten
 		ORDER BY created_at ASC
 		LIMIT $2
 	`
-	
+
 	rows, err := r.db.QueryContext(ctx, query, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var chunks []*KnowledgeChunk
 	for rows.Next() {
 		chunk := &KnowledgeChunk{}
 		var embeddingBlob []byte
 		var metadataBlob sql.NullString
 		var contentHashPtr sql.NullString
-		
+
 		if err := rows.Scan(
 			&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.ChunkType,
 			&chunk.Text, &metadataBlob, &contentHashPtr, &chunk.CompletionStatus, &embeddingBlob,
@@ -617,24 +700,24 @@ func (r *KnowledgeChunkRepository) FindIncompleteChunks(ctx context.Context, ten
 		); err != nil {
 			return nil, err
 		}
-		
+
 		// Handle NULL metadata
 		if metadataBlob.Valid && len(metadataBlob.String) > 0 {
 			chunk.Metadata = json.RawMessage(metadataBlob.String)
 		} else {
 			chunk.Metadata = json.RawMessage("{}")
 		}
-		
+
 		// Handle NULL content_hash
 		if contentHashPtr.Valid {
 			chunk.ContentHash = &contentHashPtr.String
 		}
-		
+
 		// Convert BLOB to []float32
 		if len(embeddingBlob) > 0 {
 			chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
 		}
-		
+
 		chunks = append(chunks, chunk)
 	}
 	return chunks, rows.Err()
@@ -675,7 +758,7 @@ func (r *KnowledgeChunkRepository) GetByCampaign(ctx context.Context, tenantID, 
 func (r *KnowledgeChunkRepository) GetWithEmbeddingsByTenantAndProducts(ctx context.Context, tenantID uuid.UUID, productIDs []uuid.UUID) ([]*KnowledgeChunk, error) {
 	var query string
 	var args []interface{}
-	
+
 	if len(productIDs) == 0 {
 		// Get all chunks for tenant
 		query = `
@@ -706,7 +789,7 @@ func (r *KnowledgeChunkRepository) GetWithEmbeddingsByTenantAndProducts(ctx cont
 			args[i+1] = pid
 		}
 	}
-	
+
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -718,7 +801,7 @@ func (r *KnowledgeChunkRepository) GetWithEmbeddingsByTenantAndProducts(ctx cont
 		chunk := &KnowledgeChunk{}
 		var embeddingBlob []byte
 		var metadataBlob sql.NullString // Handle NULL metadata
-		
+
 		if err := rows.Scan(
 			&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.ChunkType,
 			&chunk.Text, &metadataBlob, &embeddingBlob, &chunk.EmbeddingModel, &chunk.EmbeddingVersion,
@@ -726,19 +809,104 @@ func (r *KnowledgeChunkRepository) GetWithEmbeddingsByTenantAndProducts(ctx cont
 		); err != nil {
 			return nil, err
 		}
-		
+
 		// Handle NULL metadata
 		if metadataBlob.Valid && len(metadataBlob.String) > 0 {
 			chunk.Metadata = json.RawMessage(metadataBlob.String)
 		} else {
 			chunk.Metadata = json.RawMessage("{}") // Default to empty JSON object
 		}
-		
+
 		// Convert BLOB to []float32
 		if len(embeddingBlob) > 0 {
 			chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
 		}
-		
+
+		chunks = append(chunks, chunk)
+	}
+	return chunks, rows.Err()
+}
+
+// SpecFactChunkRepository handles spec_fact chunk persistence.
+type SpecFactChunkRepository struct {
+	db DB
+}
+
+// NewSpecFactChunkRepository creates a new spec_fact chunk repository.
+func NewSpecFactChunkRepository(db DB) *SpecFactChunkRepository {
+	return &SpecFactChunkRepository{db: db}
+}
+
+// Create inserts a new spec_fact chunk.
+func (r *SpecFactChunkRepository) Create(ctx context.Context, chunk *SpecFactChunk) error {
+	if chunk.ID == uuid.Nil {
+		chunk.ID = uuid.New()
+	}
+	chunk.CreatedAt = time.Now()
+	chunk.UpdatedAt = time.Now()
+
+	var embeddingBlob []byte
+	if len(chunk.EmbeddingVector) > 0 {
+		floats64 := make([]float64, len(chunk.EmbeddingVector))
+		for i, f := range chunk.EmbeddingVector {
+			floats64[i] = float64(f)
+		}
+		var err error
+		embeddingBlob, err = json.Marshal(floats64)
+		if err != nil {
+			return fmt.Errorf("failed to serialize embedding vector: %w", err)
+		}
+	}
+
+	query := `
+		INSERT INTO spec_fact_chunks (id, tenant_id, product_id, campaign_variant_id, spec_value_id,
+			chunk_text, gloss, embedding_vector, embedding_model, embedding_version, source, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+	`
+
+	_, err := r.db.ExecContext(ctx, query,
+		chunk.ID, chunk.TenantID, chunk.ProductID, chunk.CampaignVariantID, chunk.SpecValueID,
+		chunk.ChunkText, chunk.Gloss, embeddingBlob, chunk.EmbeddingModel, chunk.EmbeddingVersion, chunk.Source,
+		chunk.CreatedAt, chunk.UpdatedAt,
+	)
+	return err
+}
+
+// GetByCampaign retrieves spec_fact chunks for a campaign (with embeddings if present).
+func (r *SpecFactChunkRepository) GetByCampaign(ctx context.Context, tenantID, campaignID uuid.UUID) ([]*SpecFactChunk, error) {
+	query := `
+		SELECT id, tenant_id, product_id, campaign_variant_id, spec_value_id,
+			chunk_text, gloss, embedding_vector, embedding_model, embedding_version, source, created_at, updated_at
+		FROM spec_fact_chunks
+		WHERE tenant_id = $1 AND campaign_variant_id = $2
+	`
+	rows, err := r.db.QueryContext(ctx, query, tenantID, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []*SpecFactChunk
+	for rows.Next() {
+		chunk := &SpecFactChunk{}
+		var gloss sql.NullString
+		var embeddingBlob []byte
+
+		if err := rows.Scan(
+			&chunk.ID, &chunk.TenantID, &chunk.ProductID, &chunk.CampaignVariantID, &chunk.SpecValueID,
+			&chunk.ChunkText, &gloss, &embeddingBlob, &chunk.EmbeddingModel, &chunk.EmbeddingVersion, &chunk.Source,
+			&chunk.CreatedAt, &chunk.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		if gloss.Valid {
+			chunk.Gloss = &gloss.String
+		}
+		if len(embeddingBlob) > 0 {
+			chunk.EmbeddingVector = blobToFloat32Slice(embeddingBlob)
+		}
+
 		chunks = append(chunks, chunk)
 	}
 	return chunks, rows.Err()
@@ -762,13 +930,13 @@ func blobToFloat32Slice(blob []byte) []float32 {
 	if len(blob) == 0 {
 		return nil
 	}
-	
+
 	// Try JSON first (most common format)
 	var floats []float32
 	if err := json.Unmarshal(blob, &floats); err == nil {
 		return floats
 	}
-	
+
 	// Try JSON with float64 and convert
 	var floats64 []float64
 	if err := json.Unmarshal(blob, &floats64); err == nil {
@@ -778,7 +946,7 @@ func blobToFloat32Slice(blob []byte) []float32 {
 		}
 		return floats
 	}
-	
+
 	// If JSON fails, try binary format (4 bytes per float32)
 	if len(blob)%4 == 0 {
 		floats = make([]float32, len(blob)/4)
@@ -789,7 +957,7 @@ func blobToFloat32Slice(blob []byte) []float32 {
 		}
 		return floats
 	}
-	
+
 	return nil
 }
 
@@ -867,7 +1035,7 @@ func (r *LineageRepository) BatchSaveLineageEvents(ctx context.Context, events [
 			resource_id, document_source_id, ingestion_job_id, action, payload, occurred_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
-	
+
 	for _, event := range events {
 		if event.ID == uuid.Nil {
 			event.ID = uuid.New()
@@ -875,7 +1043,7 @@ func (r *LineageRepository) BatchSaveLineageEvents(ctx context.Context, events [
 		if event.OccurredAt.IsZero() {
 			event.OccurredAt = time.Now()
 		}
-		
+
 		_, err := r.db.ExecContext(ctx, query,
 			event.ID, event.TenantID, event.ProductID, event.CampaignVariantID, event.ResourceType,
 			event.ResourceID, event.DocumentSourceID, event.IngestionJobID, event.Action,
@@ -1140,6 +1308,11 @@ func (r *SpecItemRepository) Create(ctx context.Context, item *SpecItem) error {
 		aliasesJSON = "[]"
 	}
 
+	// Ensure validation_rules is never nil; store as "{}" when empty
+	if item.ValidationRules == nil {
+		item.ValidationRules = json.RawMessage([]byte("{}"))
+	}
+
 	query := `
 		INSERT INTO spec_items (id, category_id, display_name, unit, data_type, validation_rules, aliases, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1158,14 +1331,86 @@ func (r *SpecItemRepository) GetByCategoryAndName(ctx context.Context, categoryI
 		FROM spec_items WHERE category_id = $1 AND LOWER(display_name) = LOWER($2)
 	`
 	item := &SpecItem{}
+	var validationRules sql.NullString
+	var aliasesJSON sql.NullString
+	var createdAtStr string
 	err := r.db.QueryRowContext(ctx, query, categoryID, displayName).Scan(
 		&item.ID, &item.CategoryID, &item.DisplayName, &item.Unit, &item.DataType,
-		&item.ValidationRules, &item.Aliases, &item.CreatedAt,
+		&validationRules, &aliasesJSON, &createdAtStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	// Safely handle NULL validation_rules
+	if validationRules.Valid {
+		item.ValidationRules = json.RawMessage(validationRules.String)
+	} else {
+		item.ValidationRules = json.RawMessage([]byte("{}"))
+	}
+	// Safely handle aliases stored as JSON/text
+	if aliasesJSON.Valid && aliasesJSON.String != "" {
+		var aliases []string
+		if err := json.Unmarshal([]byte(aliasesJSON.String), &aliases); err == nil {
+			item.Aliases = aliases
+		} else {
+			item.Aliases = []string{}
+		}
+	} else {
+		item.Aliases = []string{}
+	}
+	if item.CreatedAt, err = parseDBTime(createdAtStr); err != nil {
+		return nil, fmt.Errorf("parse created_at: %w", err)
+	}
 	return item, err
+}
+
+// ListByCategory lists spec items in a category.
+func (r *SpecItemRepository) ListByCategory(ctx context.Context, categoryID uuid.UUID) ([]*SpecItem, error) {
+	query := `
+		SELECT id, category_id, display_name, unit, data_type, validation_rules, aliases, created_at
+		FROM spec_items
+		WHERE category_id = $1
+		ORDER BY display_name
+	`
+	rows, err := r.db.QueryContext(ctx, query, categoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []*SpecItem
+	for rows.Next() {
+		item := &SpecItem{}
+		var validationRules sql.NullString
+		var aliasesJSON sql.NullString
+		var createdAtStr string
+		if err := rows.Scan(
+			&item.ID, &item.CategoryID, &item.DisplayName, &item.Unit, &item.DataType,
+			&validationRules, &aliasesJSON, &createdAtStr,
+		); err != nil {
+			return nil, err
+		}
+		if validationRules.Valid {
+			item.ValidationRules = json.RawMessage(validationRules.String)
+		} else {
+			item.ValidationRules = json.RawMessage([]byte("{}"))
+		}
+		if aliasesJSON.Valid && aliasesJSON.String != "" {
+			var aliases []string
+			if err := json.Unmarshal([]byte(aliasesJSON.String), &aliases); err == nil {
+				item.Aliases = aliases
+			} else {
+				item.Aliases = []string{}
+			}
+		} else {
+			item.Aliases = []string{}
+		}
+		if item.CreatedAt, err = parseDBTime(createdAtStr); err != nil {
+			return nil, fmt.Errorf("parse created_at: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // GetOrCreate gets an existing spec item or creates a new one.
@@ -1211,6 +1456,7 @@ type Repositories struct {
 	SpecValues      *SpecValueRepository
 	FeatureBlocks   *FeatureBlockRepository
 	KnowledgeChunks *KnowledgeChunkRepository
+	SpecFactChunks  *SpecFactChunkRepository
 	Lineage         *LineageRepository
 	DriftAlerts     *DriftAlertRepository
 }
@@ -1227,6 +1473,7 @@ func NewRepositories(db DB) *Repositories {
 		SpecValues:      NewSpecValueRepository(db),
 		FeatureBlocks:   NewFeatureBlockRepository(db),
 		KnowledgeChunks: NewKnowledgeChunkRepository(db),
+		SpecFactChunks:  NewSpecFactChunkRepository(db),
 		Lineage:         NewLineageRepository(db),
 		DriftAlerts:     NewDriftAlertRepository(db),
 	}
@@ -1236,4 +1483,3 @@ func NewRepositories(db DB) *Repositories {
 func WithTenantScope(tenantID uuid.UUID) string {
 	return fmt.Sprintf("tenant_id = '%s'", tenantID)
 }
-

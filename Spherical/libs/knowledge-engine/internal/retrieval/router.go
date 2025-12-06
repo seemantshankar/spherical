@@ -21,11 +21,11 @@ import (
 type Intent string
 
 const (
-	IntentSpecLookup  Intent = "spec_lookup"
-	IntentUSPLookup   Intent = "usp_lookup"
-	IntentComparison  Intent = "comparison"
-	IntentFAQ         Intent = "faq"
-	IntentUnknown     Intent = "unknown"
+	IntentSpecLookup Intent = "spec_lookup"
+	IntentUSPLookup  Intent = "usp_lookup"
+	IntentComparison Intent = "comparison"
+	IntentFAQ        Intent = "faq"
+	IntentUnknown    Intent = "unknown"
 )
 
 // RequestMode represents the type of request format.
@@ -85,27 +85,31 @@ type RetrievalResponse struct {
 
 // SpecFact represents a structured specification fact.
 type SpecFact struct {
-	SpecItemID        uuid.UUID
-	Category          string
-	Name              string
-	Value             string
-	Unit              string
-	Confidence        float64
-	CampaignVariantID uuid.UUID
-	Source            SourceRef
+	SpecItemID          uuid.UUID
+	Category            string
+	Name                string
+	Value               string
+	Unit                string
+	KeyFeatures         string
+	VariantAvailability string
+	Explanation         string
+	Provenance          string // keyword | semantic
+	Confidence          float64
+	CampaignVariantID   uuid.UUID
+	Source              SourceRef
 }
 
 // SemanticChunk represents a retrieved semantic chunk.
 type SemanticChunk struct {
-	ChunkID          uuid.UUID
-	ChunkType        storage.ChunkType
-	Text             string
-	Distance         float32
-	Score            float32
-	Metadata         map[string]interface{}
-	Source           SourceRef
-	ParentCategory   string // For hierarchical grouping display
-	SubCategory      string // For hierarchical grouping display
+	ChunkID           uuid.UUID
+	ChunkType         storage.ChunkType
+	Text              string
+	Distance          float32
+	Score             float32
+	Metadata          map[string]interface{}
+	Source            SourceRef
+	ParentCategory    string // For hierarchical grouping display
+	SubCategory       string // For hierarchical grouping display
 	SpecificationType string // For filtering
 }
 
@@ -140,19 +144,19 @@ type LineageInfo struct {
 type AvailabilityStatus string
 
 const (
-	AvailabilityStatusFound      AvailabilityStatus = "found"
+	AvailabilityStatusFound       AvailabilityStatus = "found"
 	AvailabilityStatusUnavailable AvailabilityStatus = "unavailable"
-	AvailabilityStatusPartial   AvailabilityStatus = "partial" // Found but low confidence
+	AvailabilityStatusPartial     AvailabilityStatus = "partial" // Found but low confidence
 )
 
 // SpecAvailabilityStatus represents the availability status for a requested spec.
 type SpecAvailabilityStatus struct {
-	SpecName        string            `json:"spec_name"`
-	Status          AvailabilityStatus `json:"status"`
-	MatchedSpecs    []SpecFact        `json:"matched_specs,omitempty"` // If found
-	MatchedChunks   []SemanticChunk   `json:"matched_chunks,omitempty"` // If found
-	Confidence      float64           `json:"confidence"`
-	AlternativeNames []string         `json:"alternative_names,omitempty"` // Synonyms found
+	SpecName         string             `json:"spec_name"`
+	Status           AvailabilityStatus `json:"status"`
+	MatchedSpecs     []SpecFact         `json:"matched_specs,omitempty"`  // If found
+	MatchedChunks    []SemanticChunk    `json:"matched_chunks,omitempty"` // If found
+	Confidence       float64            `json:"confidence"`
+	AlternativeNames []string           `json:"alternative_names,omitempty"` // Synonyms found
 }
 
 // Router orchestrates hybrid retrieval combining structured and semantic search.
@@ -167,22 +171,23 @@ type Router struct {
 	metrics          *RouterMetrics
 }
 
-
 // RouterConfig holds router configuration.
 type RouterConfig struct {
-	MaxChunks                 int
-	StructuredFirst           bool
-	SemanticFallback          bool
-	IntentConfidenceThreshold float64
+	MaxChunks                  int
+	StructuredFirst            bool
+	SemanticFallback           bool
+	IntentConfidenceThreshold  float64
 	KeywordConfidenceThreshold float64 // Threshold for keyword-only path (default 0.8)
-	CacheResults              bool
-	CacheTTL                  time.Duration
+	CacheResults               bool
+	CacheTTL                   time.Duration
 	// New fields for structured requests
 	MinAvailabilityConfidence float64       // Threshold for "found" vs "partial"
-	BatchProcessingWorkers    int          // Parallel workers for batch processing
+	BatchProcessingWorkers    int           // Parallel workers for batch processing
 	BatchProcessingTimeout    time.Duration // Timeout for batch operations
-	EnableSummaryGeneration   bool         // Enable NL summary generation
+	EnableSummaryGeneration   bool          // Enable NL summary generation
 }
+
+const responseExplanationMaxLength = 160
 
 // RouterMetrics tracks router performance metrics.
 type RouterMetrics struct {
@@ -299,11 +304,14 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 				facts = nil
 				confidence = 0.0
 			}
-			
+
 			response.StructuredFacts = facts
 			if confidence > 0 {
 				r.metrics.ConfidenceScores = append(r.metrics.ConfidenceScores, confidence)
 			}
+
+			// When falling back to vectors, prefer spec_fact chunks
+			req.Filters.ChunkTypes = []storage.ChunkType{storage.ChunkTypeSpecFact}
 
 			// Only fallback to vector if NO results found (don't fallback if we have results, even with low confidence)
 			// Vector search should only be used when keyword search completely fails
@@ -312,12 +320,17 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 					Int("facts_count", len(facts)).
 					Float64("confidence", confidence).
 					Msg("No keyword results, triggering vector search fallback")
+				req.Filters = r.ensureSpecFactFilter(req.Filters)
 				chunks, err := r.querySemanticChunks(ctx, req)
 				if err != nil {
 					r.logger.Warn().Err(err).Msg("Semantic query failed")
 				} else {
 					response.SemanticChunks = chunks
 					if len(chunks) > 0 {
+						semanticFacts := r.specFactsFromSemanticChunks(chunks)
+						if len(semanticFacts) > 0 {
+							response.StructuredFacts = append(response.StructuredFacts, semanticFacts...)
+						}
 						usedVectorSearch = true
 						r.metrics.HybridCount++
 						r.logger.Debug().Int("chunks_found", len(chunks)).Msg("Vector search found chunks")
@@ -325,12 +338,29 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 						r.logger.Debug().Msg("Vector search returned no chunks")
 					}
 				}
+			} else if confidence < r.config.KeywordConfidenceThreshold && len(facts) > 0 && r.config.SemanticFallback {
+				// Low-confidence keyword results: enrich with semantic spec_fact chunks
+				chunks, err := r.querySemanticChunks(ctx, req)
+				if err == nil && len(chunks) > 0 {
+					// Limit to top 3 semantic chunks for enrichment
+					if len(chunks) > 3 {
+						chunks = chunks[:3]
+					}
+					response.SemanticChunks = chunks
+					semanticFacts := r.specFactsFromSemanticChunks(chunks)
+					if len(semanticFacts) > 0 {
+						response.StructuredFacts = append(response.StructuredFacts, semanticFacts...)
+					}
+					usedVectorSearch = true
+					r.metrics.HybridCount++
+				}
 			} else if len(facts) > 0 {
 				r.metrics.KeywordOnlyCount++
 				// Don't run vector search if keyword search found results - it's fast and sufficient
 			}
 		} else {
 			// StructuredFirst is false, go straight to vector
+			req.Filters.ChunkTypes = []storage.ChunkType{storage.ChunkTypeSpecFact}
 			chunks, err := r.querySemanticChunks(ctx, req)
 			if err != nil {
 				r.logger.Warn().Err(err).Msg("Semantic query failed")
@@ -388,11 +418,16 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 			chunks, _ := r.querySemanticChunks(ctx, req)
 			if len(chunks) > 0 {
 				response.SemanticChunks = chunks
+				semanticFacts := r.specFactsFromSemanticChunks(chunks)
+				if len(semanticFacts) > 0 {
+					response.StructuredFacts = append(response.StructuredFacts, semanticFacts...)
+				}
 				usedVectorSearch = true
 				r.metrics.HybridCount++
 			}
 		} else if confidence < r.config.KeywordConfidenceThreshold && len(facts) > 0 && r.config.SemanticFallback {
 			// We have facts but low confidence - add semantic chunks for context, but be selective
+			req.Filters = r.ensureSpecFactFilter(req.Filters)
 			chunks, _ := r.querySemanticChunks(ctx, req)
 			// Only add top 3 most relevant semantic chunks when we already have structured facts
 			maxSemanticChunks := 3
@@ -401,6 +436,10 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 			}
 			if len(chunks) > 0 {
 				response.SemanticChunks = chunks
+				semanticFacts := r.specFactsFromSemanticChunks(chunks)
+				if len(semanticFacts) > 0 {
+					response.StructuredFacts = append(response.StructuredFacts, semanticFacts...)
+				}
 				usedVectorSearch = true
 				r.metrics.HybridCount++
 			}
@@ -421,11 +460,22 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 	// Calculate overall confidence and availability status for natural language queries
 	confidenceCalc := NewConfidenceCalculator()
 	response.OverallConfidence = confidenceCalc.CalculateConfidenceForResponse(response)
-	
+
+	// If no structured facts but semantic chunks exist, derive facts from spec_fact chunks for response surfaces.
+	if len(response.StructuredFacts) == 0 && len(response.SemanticChunks) > 0 {
+		semanticFacts := r.specFactsFromSemanticChunks(response.SemanticChunks)
+		if len(semanticFacts) > 0 {
+			response.StructuredFacts = append(response.StructuredFacts, semanticFacts...)
+		}
+	}
+
 	// Determine availability for natural language queries (if we can extract spec names)
 	if req.Question != "" {
 		response.SpecAvailability = r.determineAvailabilityForQuery(ctx, req, response)
 	}
+
+	// Sanitize explanations before returning
+	response.StructuredFacts = r.sanitizeFacts(response.StructuredFacts)
 
 	response.LatencyMs = time.Since(start).Milliseconds()
 
@@ -436,6 +486,7 @@ func (r *Router) Query(ctx context.Context, req RetrievalRequest) (*RetrievalRes
 		} else {
 			r.metrics.VectorLatencyMs = append(r.metrics.VectorLatencyMs, response.LatencyMs)
 		}
+		r.logger.Debug().Msg("Semantic fallback used in retrieval response")
 	} else {
 		r.metrics.KeywordLatencyMs = append(r.metrics.KeywordLatencyMs, response.LatencyMs)
 	}
@@ -512,7 +563,7 @@ func (r *Router) ProcessStructuredSpecs(ctx context.Context, req RetrievalReques
 	// Aggregate all matched specs and chunks
 	allFacts := make([]SpecFact, 0)
 	allChunks := make([]SemanticChunk, 0)
-	factMap := make(map[string]bool) // Deduplicate facts
+	factMap := make(map[string]bool)     // Deduplicate facts
 	chunkMap := make(map[uuid.UUID]bool) // Deduplicate chunks
 
 	for _, status := range specStatuses {
@@ -533,11 +584,11 @@ func (r *Router) ProcessStructuredSpecs(ctx context.Context, req RetrievalReques
 
 	// Build response
 	response := &RetrievalResponse{
-		Intent:            IntentSpecLookup,
-		StructuredFacts:   allFacts,
-		SemanticChunks:    allChunks,
-		SpecAvailability:  specStatuses,
-		LatencyMs:         time.Since(start).Milliseconds(),
+		Intent:           IntentSpecLookup,
+		StructuredFacts:  allFacts,
+		SemanticChunks:   allChunks,
+		SpecAvailability: specStatuses,
+		LatencyMs:        time.Since(start).Milliseconds(),
 	}
 
 	// Calculate overall confidence
@@ -640,7 +691,7 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 	if len(keywords) > 1 {
 		searchLimit = 100 // Get more results per keyword when querying multiple keywords
 	}
-	
+
 	// Perform keyword search for each keyword
 	factMap := make(map[string]*SpecFact)
 	for _, keyword := range keywords {
@@ -655,7 +706,7 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 		// Also try singular/plural variations and spelling variants
 		// Always try variants (not just when len(specs) == 0) to improve coverage
 		variantsToTry := []string{}
-		
+
 		// Handle irregular plurals
 		keywordLower := strings.ToLower(keyword)
 		irregularPlurals := map[string]string{
@@ -666,11 +717,11 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 			"people":   "person",
 			"person":   "people",
 		}
-		
+
 		if variant, ok := irregularPlurals[keywordLower]; ok {
 			variantsToTry = append(variantsToTry, variant)
 		}
-		
+
 		// Try singular/plural (regular forms)
 		if keywordLower != "children" && keywordLower != "child" {
 			if strings.HasSuffix(keyword, "s") && len(keyword) > 1 && keywordLower != "children" {
@@ -679,14 +730,32 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 				variantsToTry = append(variantsToTry, keyword+"s")
 			}
 		}
-		
+
 		// Try spelling variants (colour/color, etc.)
 		if keywordLower == "colours" || keywordLower == "colour" {
 			variantsToTry = append(variantsToTry, "color", "colors")
 		} else if keywordLower == "colors" || keywordLower == "color" {
 			variantsToTry = append(variantsToTry, "colour", "colours")
 		}
-		
+
+		// Seatbelt/seat-belts variants (user may type without space)
+		if strings.Contains(keywordLower, "seatbelt") {
+			variantsToTry = append(variantsToTry, "seat belt", "seat belts")
+		}
+
+		// Phone/connectivity variants (surface CarPlay/Android Auto/Bluetooth/USB)
+		if strings.Contains(keywordLower, "phone") || strings.Contains(keywordLower, "connect") {
+			variantsToTry = append(variantsToTry,
+				"apple carplay",
+				"android auto",
+				"bluetooth",
+				"usb connectivity",
+				"smartphone",
+				"smartphone navigation",
+				"smartplay",
+			)
+		}
+
 		// Try all variants and merge results
 		for _, variant := range variantsToTry {
 			if variant != "" && variant != keyword {
@@ -730,14 +799,30 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 				if sv.Unit != nil {
 					unit = *sv.Unit
 				}
+				keyFeatures := ""
+				if sv.KeyFeatures != nil {
+					keyFeatures = *sv.KeyFeatures
+				}
+				variantAvailability := ""
+				if sv.VariantAvailability != nil {
+					variantAvailability = *sv.VariantAvailability
+				}
+				explanation := ""
+				if sv.Explanation != nil {
+					explanation = sanitizeExplanation(*sv.Explanation)
+				}
 				factMap[key] = &SpecFact{
-					SpecItemID:        sv.SpecItemID,
-					Category:           sv.CategoryName,
-					Name:               sv.SpecName,
-					Value:              sv.Value,
-					Unit:               unit,
-					Confidence:         sv.Confidence,
-					CampaignVariantID:  sv.CampaignVariantID,
+					SpecItemID:          sv.SpecItemID,
+					Category:            sv.CategoryName,
+					Name:                sv.SpecName,
+					Value:               sv.Value,
+					Unit:                unit,
+					KeyFeatures:         keyFeatures,
+					VariantAvailability: variantAvailability,
+					Explanation:         explanation,
+					Provenance:          "keyword",
+					Confidence:          sv.Confidence,
+					CampaignVariantID:   sv.CampaignVariantID,
 					Source: SourceRef{
 						DocumentSourceID: sv.SourceDocID,
 						Page:             sv.SourcePage,
@@ -764,7 +849,7 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 	// Limit to top results to avoid noise, but keep more for color searches or multi-keyword queries
 	maxResults := 30 // Increased default to handle multi-keyword queries better
 	queryLower := strings.ToLower(req.Question)
-	
+
 	// Check for color-related queries (handle both singular/plural and US/UK spelling)
 	// Also check for queries that might be asking about colors (body colors, exterior colors, etc.)
 	hasColorKeyword := false
@@ -775,21 +860,21 @@ func (r *Router) queryStructuredSpecs(ctx context.Context, req RetrievalRequest)
 			break
 		}
 	}
-	isColorQuery := hasColorKeyword || strings.Contains(queryLower, "color") || strings.Contains(queryLower, "colour") || 
-	   strings.Contains(queryLower, "colors") || strings.Contains(queryLower, "colours") ||
-	   strings.Contains(queryLower, "body color") || strings.Contains(queryLower, "body colour") ||
-	   strings.Contains(queryLower, "exterior color") || strings.Contains(queryLower, "exterior colour")
-	
+	isColorQuery := hasColorKeyword || strings.Contains(queryLower, "color") || strings.Contains(queryLower, "colour") ||
+		strings.Contains(queryLower, "colors") || strings.Contains(queryLower, "colours") ||
+		strings.Contains(queryLower, "body color") || strings.Contains(queryLower, "body colour") ||
+		strings.Contains(queryLower, "exterior color") || strings.Contains(queryLower, "exterior colour")
+
 	if isColorQuery {
 		maxResults = 100 // Allow many results for color queries to get all color options
 	}
-	
+
 	// Multi-keyword queries - limit results more aggressively for focused queries
 	// BUT: Don't limit color queries - they need to return all available colors
 	if len(keywords) >= 2 && !isColorQuery {
-		// For focused 2-keyword queries (like "child seat"), limit to top 5
+		// For focused 2-keyword queries (like "child seat"), keep a generous window so grouped specs (e.g., instrument cluster) are not truncated
 		if len(keywords) == 2 {
-			maxResults = 5 // Focused queries - only top 5 most relevant
+			maxResults = 50 // Allow many rows for two-keyword queries
 		} else {
 			maxResults = 60 // Multi-keyword queries like "weight wheels colors length" need more results
 		}
@@ -891,13 +976,13 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 	// Convert to response format and filter by relevance
 	filteredChunks := make([]SemanticChunk, 0, len(results))
 	queryKeywords := r.extractKeywords(req.Question)
-	
+
 	maxChunksToReturn := 10 // Default limit
 	if len(results) > 0 && results[0].Score < 0.3 {
 		maxChunksToReturn = 3 // Very strict limit if best match is poor
 	}
-	
-		for _, result := range results {
+
+	for _, result := range results {
 		// Filter by minimum score threshold
 		if result.Score >= minScore {
 			chunk := SemanticChunk{
@@ -938,7 +1023,7 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 						chunk.Source.DocumentSourceID = &sourceDocID
 					}
 				}
-				
+
 				// Extract category metadata for spec_row chunks
 				if chunk.ChunkType == storage.ChunkTypeSpecRow {
 					if pc, ok := result.Metadata["parent_category"].(string); ok {
@@ -950,13 +1035,13 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 					if st, ok := result.Metadata["specification_type"].(string); ok {
 						chunk.SpecificationType = st
 					}
-					
+
 					// Extract parsed_spec_ids for source references
 					if psids, ok := result.Metadata["parsed_spec_ids"].([]interface{}); ok {
 						// Store in metadata for reference
 						chunk.Metadata["parsed_spec_ids"] = psids
 					}
-					
+
 					// Apply specification type filtering if requested
 					if req.Filters.SpecificationType != nil && chunk.SpecificationType != *req.Filters.SpecificationType {
 						continue // Skip chunks that don't match specification type filter
@@ -964,7 +1049,7 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 				}
 			}
 			filteredChunks = append(filteredChunks, chunk)
-			
+
 			// Limit total results
 			if len(filteredChunks) >= maxChunksToReturn {
 				break
@@ -988,7 +1073,7 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 				break
 			}
 		}
-		
+
 		if hasSpecRows {
 			// Group spec_row chunks hierarchically
 			groupedChunks := r.groupChunksByCategory(filteredChunks)
@@ -999,13 +1084,129 @@ func (r *Router) querySemanticChunks(ctx context.Context, req RetrievalRequest) 
 	return filteredChunks, nil
 }
 
+// specFactsFromSemanticChunks converts spec_fact semantic chunks into structured facts with semantic provenance.
+func (r *Router) specFactsFromSemanticChunks(chunks []SemanticChunk) []SpecFact {
+	facts := []SpecFact{}
+	seen := make(map[string]struct{})
+
+	for _, chunk := range chunks {
+		if chunk.ChunkType != storage.ChunkTypeSpecFact {
+			if ct, ok := chunk.Metadata["chunk_type"].(string); !ok || storage.ChunkType(ct) != storage.ChunkTypeSpecFact {
+				continue
+			}
+		}
+		var campaignVariantID uuid.UUID
+		if cvidStr, ok := chunk.Metadata["campaign_variant_id"].(string); ok {
+			if parsed, err := uuid.Parse(cvidStr); err == nil {
+				campaignVariantID = parsed
+			}
+		}
+		category, _ := chunk.Metadata["category"].(string)
+		name, _ := chunk.Metadata["name"].(string)
+		value, _ := chunk.Metadata["value"].(string)
+		unit, _ := chunk.Metadata["unit"].(string)
+		keyFeatures, _ := chunk.Metadata["key_features"].(string)
+		variantAvailability, _ := chunk.Metadata["variant_availability"].(string)
+		explanation, _ := chunk.Metadata["explanation"].(string)
+		explanation = sanitizeExplanation(explanation)
+		sourceDocIDStr, _ := chunk.Metadata["source_doc_id"].(string)
+		var sourceDocID *uuid.UUID
+		if sourceDocIDStr != "" {
+			if parsed, err := uuid.Parse(sourceDocIDStr); err == nil {
+				sourceDocID = &parsed
+			}
+		}
+		var sourcePage *int
+		if pageAny, ok := chunk.Metadata["source_page"]; ok {
+			switch v := pageAny.(type) {
+			case int:
+				sourcePage = &v
+			case float64:
+				page := int(v)
+				sourcePage = &page
+			}
+		}
+
+		key := category + "|" + name + "|" + value + "|" + unit + "|" + campaignVariantID.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		facts = append(facts, SpecFact{
+			Category:            category,
+			Name:                name,
+			Value:               value,
+			Unit:                unit,
+			KeyFeatures:         keyFeatures,
+			VariantAvailability: variantAvailability,
+			Explanation:         explanation,
+			Provenance:          "semantic",
+			Confidence:          float64(1 - chunk.Distance),
+			CampaignVariantID:   campaignVariantID,
+			Source: SourceRef{
+				DocumentSourceID: sourceDocID,
+				Page:             sourcePage,
+			},
+		})
+	}
+
+	return facts
+}
+
+// ensureSpecFactFilter applies a default spec_fact chunk filter for semantic fallback when none provided.
+func (r *Router) ensureSpecFactFilter(filters RetrievalFilters) RetrievalFilters {
+	if len(filters.ChunkTypes) == 0 {
+		filters.ChunkTypes = []storage.ChunkType{storage.ChunkTypeSpecFact}
+	}
+	return filters
+}
+
+func sanitizeExplanation(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.ReplaceAll(trimmed, "\n", " ")
+	trimmed = strings.Join(strings.Fields(trimmed), " ")
+
+	// Keep only the first sentence if multiple sentence terminators exist.
+	for i, ch := range trimmed {
+		if ch == '.' || ch == '!' || ch == '?' {
+			if i < len(trimmed)-1 {
+				trimmed = trimmed[:i+1]
+			}
+			break
+		}
+	}
+
+	if len(trimmed) > responseExplanationMaxLength {
+		trimmed = strings.TrimSpace(trimmed[:responseExplanationMaxLength])
+		trimmed = strings.TrimRight(trimmed, ".!?")
+		trimmed += "..."
+	}
+
+	if !strings.HasSuffix(trimmed, ".") && !strings.HasSuffix(trimmed, "!") && !strings.HasSuffix(trimmed, "?") && !strings.HasSuffix(trimmed, "...") {
+		trimmed += "."
+	}
+
+	return trimmed
+}
+
+func (r *Router) sanitizeFacts(facts []SpecFact) []SpecFact {
+	for i := range facts {
+		facts[i].Explanation = sanitizeExplanation(facts[i].Explanation)
+	}
+	return facts
+}
+
 // groupChunksByCategory groups chunks hierarchically by parent_category then sub_category.
 // Returns chunks in grouped order: parent categories first, then sub-categories within each parent.
 func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 	// Separate spec_row chunks from other chunks
 	var specRowChunks []SemanticChunk
 	var otherChunks []SemanticChunk
-	
+
 	for _, chunk := range chunks {
 		if chunk.ChunkType == storage.ChunkTypeSpecRow {
 			specRowChunks = append(specRowChunks, chunk)
@@ -1013,11 +1214,11 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 			otherChunks = append(otherChunks, chunk)
 		}
 	}
-	
+
 	if len(specRowChunks) == 0 {
 		return chunks // No spec_row chunks, return as-is
 	}
-	
+
 	// Build hierarchical structure: parent_category -> sub_category -> chunks
 	type SubCategoryGroup struct {
 		SubCategory string
@@ -1027,15 +1228,15 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 		ParentCategory string
 		SubCategories  []SubCategoryGroup
 	}
-	
+
 	parentMap := make(map[string]*ParentCategoryGroup)
-	
+
 	// Group chunks by category
 	for _, chunk := range specRowChunks {
 		metadata := extractChunkMetadata(chunk)
 		parentCategory := metadata.ParentCategory
 		subCategory := metadata.SubCategory
-		
+
 		// Use defaults if empty
 		if parentCategory == "" {
 			parentCategory = "Uncategorized"
@@ -1043,7 +1244,7 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 		if subCategory == "" {
 			subCategory = "General"
 		}
-		
+
 		// Get or create parent category group
 		parentGroup, exists := parentMap[parentCategory]
 		if !exists {
@@ -1053,7 +1254,7 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 			}
 			parentMap[parentCategory] = parentGroup
 		}
-		
+
 		// Find or create sub-category group
 		subGroupIdx := -1
 		for i, sg := range parentGroup.SubCategories {
@@ -1069,15 +1270,15 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 			})
 			subGroupIdx = len(parentGroup.SubCategories) - 1
 		}
-		
+
 		// Add chunk to sub-category group
 		parentGroup.SubCategories[subGroupIdx].Chunks = append(parentGroup.SubCategories[subGroupIdx].Chunks, chunk)
 	}
-	
+
 	// Flatten hierarchical structure into ordered list
 	// Order: parent categories alphabetically, then sub-categories within each parent, then chunks
 	var groupedChunks []SemanticChunk
-	
+
 	// Sort parent categories
 	parentCategories := make([]string, 0, len(parentMap))
 	for pc := range parentMap {
@@ -1091,11 +1292,11 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 			}
 		}
 	}
-	
+
 	// Build grouped list
 	for _, parentCategory := range parentCategories {
 		parentGroup := parentMap[parentCategory]
-		
+
 		// Sort sub-categories
 		for i := 0; i < len(parentGroup.SubCategories)-1; i++ {
 			for j := i + 1; j < len(parentGroup.SubCategories); j++ {
@@ -1104,33 +1305,33 @@ func (r *Router) groupChunksByCategory(chunks []SemanticChunk) []SemanticChunk {
 				}
 			}
 		}
-		
+
 		// Add chunks from each sub-category
 		for _, subGroup := range parentGroup.SubCategories {
 			groupedChunks = append(groupedChunks, subGroup.Chunks...)
 		}
 	}
-	
+
 	// Append other chunks at the end
 	groupedChunks = append(groupedChunks, otherChunks...)
-	
+
 	return groupedChunks
 }
 
 // ChunkMetadata holds extracted metadata from a chunk.
 type ChunkMetadata struct {
-	ParentCategory    string
-	SubCategory       string
-	SpecificationType string
-	Value             string
+	ParentCategory     string
+	SubCategory        string
+	SpecificationType  string
+	Value              string
 	AdditionalMetadata string
-	ParsedSpecIDs     []string
+	ParsedSpecIDs      []string
 }
 
 // extractChunkMetadata extracts metadata from a SemanticChunk.
 func extractChunkMetadata(chunk SemanticChunk) ChunkMetadata {
 	metadata := ChunkMetadata{}
-	
+
 	if chunk.Metadata != nil {
 		if pc, ok := chunk.Metadata["parent_category"].(string); ok {
 			metadata.ParentCategory = pc
@@ -1157,7 +1358,7 @@ func extractChunkMetadata(chunk SemanticChunk) ChunkMetadata {
 			metadata.ParsedSpecIDs = psids
 		}
 	}
-	
+
 	return metadata
 }
 
@@ -1411,7 +1612,7 @@ func (c *IntentClassifier) Classify(question string) (Intent, float64) {
 			specMatches++
 		}
 	}
-	
+
 	// Calculate spec confidence based on number of matches
 	// 1 match = 0.7, 2 matches = 0.85, 3+ matches = 0.95
 	if specMatches > 0 {
@@ -1442,7 +1643,7 @@ func (c *IntentClassifier) Classify(question string) (Intent, float64) {
 	if len(q) < 3 {
 		return IntentUnknown, 0.3
 	}
-	
+
 	// Default to spec lookup for most queries (better to try than return unknown)
 	return IntentSpecLookup, 0.4
 }
@@ -1516,24 +1717,24 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 
 	// Create a map to store relevance scores
 	type scoredFact struct {
-		fact   SpecFact
-		score  float64
+		fact  SpecFact
+		score float64
 	}
 	scored := make([]scoredFact, len(facts))
 
 	for i, fact := range facts {
 		score := fact.Confidence // Start with base confidence
-		
+
 		// Pre-compute lowercase versions once
 		categoryLower := strings.ToLower(fact.Category)
 		nameLower := strings.ToLower(fact.Name)
 		valueLower := strings.ToLower(fact.Value)
-		
+
 		// Count how many keywords match
 		matchesInName := 0
 		matchesInCategory := 0
 		matchesInValue := 0
-		
+
 		// Check each keyword
 		for _, kw := range keywords {
 			kwLower := strings.ToLower(kw)
@@ -1562,7 +1763,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 				matchesInValue++
 			}
 		}
-		
+
 		// Bonus for matching multiple keywords in the same field (indicates high relevance)
 		if matchesInName > 1 {
 			score += float64(matchesInName-1) * 1.5 // Extra bonus for multiple keyword matches in name
@@ -1570,10 +1771,10 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 		if matchesInCategory > 0 && matchesInName > 0 {
 			score += 1.0 // Bonus when both category and name match
 		}
-		
+
 		// Bonus for related terms (e.g., "seating" relates to "seats", "material" relates to "materials")
 		combinedText := categoryLower + " " + nameLower + " " + valueLower
-		
+
 		// Check for related terms
 		hasSeatsKeyword := false
 		hasMaterialKeyword := false
@@ -1586,14 +1787,14 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 				hasMaterialKeyword = true
 			}
 		}
-		
+
 		if hasSeatsKeyword && (strings.Contains(nameLower, "seating") || strings.Contains(nameLower, "seat")) {
 			score += 1.5 // Bonus for seat/seating relationship
 		}
 		if hasMaterialKeyword && strings.Contains(nameLower, "material") {
 			score += 1.5 // Bonus for material match in name
 		}
-		
+
 		// Check for phrase matches (e.g., "audio system", "child seat" as phrases)
 		// Extract multi-word phrases from keywords (phrases with 2+ words)
 		for _, kw := range keywords {
@@ -1610,7 +1811,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 				}
 			}
 		}
-		
+
 		// Also check if multiple keywords appear together as a phrase (even if not extracted as phrase keyword)
 		// This helps with queries like "child seat" where keywords are separate
 		if len(keywords) >= 2 {
@@ -1628,7 +1829,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 				}
 			}
 		}
-		
+
 		// If multiple keywords appear together in the same fact, give bonus
 		keywordCount := 0
 		for _, kw := range keywords {
@@ -1642,7 +1843,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 		if keywordCount >= 2 {
 			score += 1.0 // Bonus when multiple keywords appear in the same fact
 		}
-		
+
 		// Penalty if fact only matches generic/stop words (should be filtered out by stop words, but just in case)
 		// Require at least one substantial keyword match for multi-keyword queries
 		// Count phrase keywords separately
@@ -1655,7 +1856,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 				nonPhraseKeywords = append(nonPhraseKeywords, kw)
 			}
 		}
-		
+
 		// For multi-keyword queries (2+ non-phrase keywords), heavily penalize facts that only match one
 		if len(nonPhraseKeywords) >= 2 {
 			substantialMatches := 0
@@ -1676,7 +1877,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 					break
 				}
 			}
-			
+
 			// Heavy penalty if fact only matches one keyword
 			if substantialMatches < len(nonPhraseKeywords) {
 				if bothKeywordsPresent {
@@ -1693,7 +1894,7 @@ func (r *Router) rankFactsByRelevance(facts []SpecFact, keywords []string, query
 					score *= 0.05 // Extremely heavy penalty (95% reduction)
 				}
 			}
-			
+
 			// Big bonus if fact matches all keywords
 			if substantialMatches == len(nonPhraseKeywords) && bothKeywordsPresent {
 				score += 10.0 // Very big bonus for matching all keywords (increased from 5.0)
@@ -1729,25 +1930,25 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 
 	// Re-rank to get scores (we need scores for filtering)
 	type scoredFact struct {
-		fact   SpecFact
-		score  float64
+		fact  SpecFact
+		score float64
 	}
 	scored := make([]scoredFact, len(facts))
-	
+
 	for i, fact := range facts {
 		score := 0.0
 		categoryLower := strings.ToLower(fact.Category)
 		nameLower := strings.ToLower(fact.Name)
 		valueLower := strings.ToLower(fact.Value)
 		combinedText := categoryLower + " " + nameLower + " " + valueLower
-		
+
 		// Count keyword matches
 		matchesInName := 0
 		matchesInCategory := 0
-		
+
 		for _, kw := range keywords {
 			kwLower := strings.ToLower(kw)
-			
+
 			// Phrase keywords get higher weight
 			if strings.Contains(kw, " ") {
 				phraseLower := strings.ToLower(kw)
@@ -1775,7 +1976,7 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 					score += 0.5
 					matched = true
 				}
-				
+
 				// Also check for variants if no exact match (for facts found via variant search)
 				if !matched {
 					// Special handling for color/colour keywords
@@ -1832,21 +2033,21 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 				}
 			}
 		}
-		
+
 		// Bonus for multiple keyword matches
 		if matchesInName >= 2 || (matchesInCategory > 0 && matchesInName > 0) {
 			score += 2.0
 		}
-		
+
 		// For multi-keyword queries, give bonus if fact matches a keyword even if not all keywords match
 		// This ensures facts matching individual keywords are included
 		if len(keywords) >= 3 && (matchesInName > 0 || matchesInCategory > 0) {
 			score += 1.0 // Bonus for matching at least one keyword in multi-keyword queries
 		}
-		
+
 		scored[i] = scoredFact{fact: fact, score: score}
 	}
-	
+
 	// Filter by minimum relevance threshold
 	// For multi-keyword queries, require higher relevance and match multiple keywords
 	minScore := 1.0 // Minimum score to include
@@ -1856,33 +2057,33 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 			nonPhraseKeywords = append(nonPhraseKeywords, kw)
 		}
 	}
-	
+
 	if len(nonPhraseKeywords) >= 2 {
-			// For multi-keyword queries, adjust threshold based on number of keywords
-			// More keywords = more permissive (user wants to see facts for each keyword)
-			if len(nonPhraseKeywords) >= 4 {
-				minScore = 0.5 // Very permissive for 4+ keywords - match any keyword
-			} else if len(nonPhraseKeywords) == 3 {
-				minScore = 1.0 // Moderate for 3 keywords
-			} else {
-				minScore = 3.0 // Strict for 2 keywords - must match both
+		// For multi-keyword queries, adjust threshold based on number of keywords
+		// More keywords = more permissive (user wants to see facts for each keyword)
+		if len(nonPhraseKeywords) >= 4 {
+			minScore = 0.5 // Very permissive for 4+ keywords - match any keyword
+		} else if len(nonPhraseKeywords) == 3 {
+			minScore = 1.0 // Moderate for 3 keywords
+		} else {
+			minScore = 3.0 // Strict for 2 keywords - must match both
+		}
+
+		// Check if this is a color-related query - be more lenient with matching
+		isColorQuery := false
+		for _, kw := range nonPhraseKeywords {
+			kwLower := strings.ToLower(kw)
+			if kwLower == "color" || kwLower == "colors" || kwLower == "colour" || kwLower == "colours" {
+				isColorQuery = true
+				break
 			}
-			
-			// Check if this is a color-related query - be more lenient with matching
-			isColorQuery := false
-			for _, kw := range nonPhraseKeywords {
-				kwLower := strings.ToLower(kw)
-				if kwLower == "color" || kwLower == "colors" || kwLower == "colour" || kwLower == "colours" {
-					isColorQuery = true
-					break
-				}
-			}
-			
+		}
+
 		// Check each fact to ensure it matches keywords
 		// Phrase keywords (quoted) and non-phrase keywords are treated separately
 		// A fact can match EITHER a phrase keyword OR a non-phrase keyword
 		tempScored := make([]scoredFact, 0, len(scored))
-		
+
 		// Extract phrase keywords separately
 		phraseKeywords := []string{}
 		for _, kw := range keywords {
@@ -1890,14 +2091,14 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 				phraseKeywords = append(phraseKeywords, kw)
 			}
 		}
-		
+
 		for _, s := range scored {
 			fact := s.fact
 			categoryLower := strings.ToLower(fact.Category)
 			nameLower := strings.ToLower(fact.Name)
 			valueLower := strings.ToLower(fact.Value)
 			combinedText := categoryLower + " " + nameLower + " " + valueLower
-			
+
 			// Check if fact matches any phrase keyword (quoted phrases)
 			// Phrase keywords require the full phrase to appear together
 			matchesPhrase := false
@@ -1908,7 +2109,7 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 					break
 				}
 			}
-			
+
 			// Check if fact matches non-phrase keywords
 			// Also check for singular/plural variants (e.g., "speaker" matches "speakers", "color" matches "colors")
 			keywordMatches := 0
@@ -1916,34 +2117,34 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 			for _, kw := range nonPhraseKeywords {
 				kwLower := strings.ToLower(kw)
 				// Check ALL fields (category, name, value) for keyword matches
-				matches := strings.Contains(categoryLower, kwLower) || 
-				   strings.Contains(nameLower, kwLower) || 
-				   strings.Contains(valueLower, kwLower)
-				
+				matches := strings.Contains(categoryLower, kwLower) ||
+					strings.Contains(nameLower, kwLower) ||
+					strings.Contains(valueLower, kwLower)
+
 				// Also check for singular/plural variants (facts found via variant search)
 				// Special handling for color/colour keywords first
 				if !matches {
 					if kwLower == "colors" || kwLower == "colours" {
 						// Try singular variant for color keywords
 						matches = strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colour") ||
-						   strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") ||
-						   strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colour")
+							strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") ||
+							strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colour")
 					} else if kwLower == "color" || kwLower == "colour" {
 						// Try plural variant for color keywords
 						matches = strings.Contains(categoryLower, "colors") || strings.Contains(categoryLower, "colours") ||
-						   strings.Contains(nameLower, "colors") || strings.Contains(nameLower, "colours") ||
-						   strings.Contains(valueLower, "colors") || strings.Contains(valueLower, "colours")
+							strings.Contains(nameLower, "colors") || strings.Contains(nameLower, "colours") ||
+							strings.Contains(valueLower, "colors") || strings.Contains(valueLower, "colours")
 					}
 					// Also check cross-spelling variants (US vs UK)
 					if !matches {
 						if kwLower == "colors" || kwLower == "color" {
 							matches = strings.Contains(categoryLower, "colour") || strings.Contains(categoryLower, "colours") ||
-							   strings.Contains(nameLower, "colour") || strings.Contains(nameLower, "colours") ||
-							   strings.Contains(valueLower, "colour") || strings.Contains(valueLower, "colours")
+								strings.Contains(nameLower, "colour") || strings.Contains(nameLower, "colours") ||
+								strings.Contains(valueLower, "colour") || strings.Contains(valueLower, "colours")
 						} else if kwLower == "colours" || kwLower == "colour" {
 							matches = strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colors") ||
-							   strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colors") ||
-							   strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colors")
+								strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colors") ||
+								strings.Contains(valueLower, "color") || strings.Contains(valueLower, "colors")
 						}
 					}
 					// For other keywords, try singular/plural variants
@@ -1951,19 +2152,19 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 						// Try singular variant (if keyword is plural like "speakers")
 						if strings.HasSuffix(kwLower, "s") && len(kwLower) > 1 {
 							singular := kwLower[:len(kwLower)-1]
-							matches = strings.Contains(categoryLower, singular) || 
-							   strings.Contains(nameLower, singular) || 
-							   strings.Contains(valueLower, singular)
+							matches = strings.Contains(categoryLower, singular) ||
+								strings.Contains(nameLower, singular) ||
+								strings.Contains(valueLower, singular)
 						} else {
 							// Try plural variant (if keyword is singular like "speaker")
 							plural := kwLower + "s"
-							matches = strings.Contains(categoryLower, plural) || 
-							   strings.Contains(nameLower, plural) || 
-							   strings.Contains(valueLower, plural)
+							matches = strings.Contains(categoryLower, plural) ||
+								strings.Contains(nameLower, plural) ||
+								strings.Contains(valueLower, plural)
 						}
 					}
 				}
-				
+
 				if matches {
 					keywordMatches++
 				}
@@ -1972,24 +2173,24 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 					hasColorKeyword = true
 				}
 			}
-			
+
 			// Include fact if it matches a phrase keyword OR matches non-phrase keywords
 			shouldInclude := false
-			
+
 			// If it matches a phrase keyword, include it
 			if matchesPhrase {
 				shouldInclude = true
 			}
-			
+
 			// Also check non-phrase keyword matching
 			// For color queries, if the fact is about colors and matches the color keyword, include it
 			if isColorQuery && hasColorKeyword {
 				if strings.Contains(categoryLower, "color") || strings.Contains(categoryLower, "colour") ||
-				   strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") {
+					strings.Contains(nameLower, "color") || strings.Contains(nameLower, "colour") {
 					shouldInclude = true
 				}
 			}
-			
+
 			// For queries with many keywords (4+), be more permissive - return facts matching ANY keyword
 			// This allows users to get all relevant facts for each keyword they asked about
 			if len(nonPhraseKeywords) >= 4 {
@@ -2005,7 +2206,7 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 					shouldInclude = true
 				}
 			} else if len(nonPhraseKeywords) == 2 {
-				// For 2 keywords, require both to match (focused queries)
+				// For 2 keywords, prefer both, but we'll fall back to OR if nothing matches both
 				if keywordMatches == 2 {
 					shouldInclude = true
 				}
@@ -2015,34 +2216,63 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 					shouldInclude = true
 				}
 			}
-			
+
 			if shouldInclude {
 				tempScored = append(tempScored, s)
 			}
 		}
-			
-			// Use filtered results
-			// For 4+ keywords: facts matching at least 1 keyword
-			// For 3 keywords: facts matching at least 1 keyword  
-			// For 2 keywords: facts matching both keywords
-			if len(tempScored) > 0 {
-				scored = tempScored
-				var matchDesc string
-				if len(nonPhraseKeywords) >= 4 {
-					matchDesc = "matching at least 1 keyword"
-				} else if len(nonPhraseKeywords) == 3 {
-					matchDesc = "matching at least 1 keyword"
-				} else {
-					matchDesc = "matching all keywords"
+
+		// Use filtered results
+		// For 4+ keywords: facts matching at least 1 keyword
+		// For 3 keywords: facts matching at least 1 keyword
+		// For 2 keywords: facts matching both keywords
+		if len(tempScored) > 0 {
+			scored = tempScored
+			var matchDesc string
+			if len(nonPhraseKeywords) >= 4 {
+				matchDesc = "matching at least 1 keyword"
+			} else if len(nonPhraseKeywords) == 3 {
+				matchDesc = "matching at least 1 keyword"
+			} else { // 2 keywords
+				matchDesc = "matching all keywords"
+			}
+			r.logger.Debug().
+				Int("filtered_facts", len(tempScored)).
+				Int("total_facts", len(scored)).
+				Strs("keywords", nonPhraseKeywords).
+				Msg(fmt.Sprintf("Filtered to facts %s", matchDesc))
+		} else {
+			// No facts matched under the current rule. For 2-keyword queries, retry with OR (match any).
+			if len(nonPhraseKeywords) == 2 {
+				tempScored = make([]scoredFact, 0, len(scored))
+				for _, s := range scored {
+					fact := s.fact
+					text := strings.ToLower(fact.Category + " " + fact.Name + " " + fact.Value)
+					matches := 0
+					for _, kw := range nonPhraseKeywords {
+						if strings.Contains(text, strings.ToLower(kw)) {
+							matches++
+						}
+					}
+					if matches >= 1 {
+						tempScored = append(tempScored, s)
+					}
 				}
-				r.logger.Debug().
-					Int("filtered_facts", len(tempScored)).
-					Int("total_facts", len(scored)).
-					Strs("keywords", nonPhraseKeywords).
-					Msg(fmt.Sprintf("Filtered to facts %s", matchDesc))
+				if len(tempScored) > 0 {
+					scored = tempScored
+					r.logger.Debug().
+						Int("filtered_facts", len(tempScored)).
+						Int("total_facts", len(scored)).
+						Strs("keywords", nonPhraseKeywords).
+						Msg("No facts matched both keywords; falling back to OR (match any keyword)")
+				} else {
+					scored = []scoredFact{}
+					r.logger.Debug().
+						Strs("keywords", nonPhraseKeywords).
+						Msg("No facts matched either keyword; returning empty results")
+				}
 			} else {
-				// If no facts match keywords, it means the query might be too specific
-				// In this case, don't return irrelevant results - return empty or very few
+				// For other cases, keep empty to avoid irrelevant results
 				var matchDesc string
 				if len(nonPhraseKeywords) >= 4 {
 					matchDesc = "at least 1 keyword"
@@ -2055,10 +2285,11 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 					Int("total_facts", len(scored)).
 					Strs("keywords", nonPhraseKeywords).
 					Msg(fmt.Sprintf("No facts matched %s - returning empty results", matchDesc))
-				scored = []scoredFact{} // Return empty - better than irrelevant results
+				scored = []scoredFact{}
 			}
 		}
-	
+	}
+
 	// Check if we have phrase keywords - require phrase match
 	// But be more lenient for multi-keyword queries where we want to return facts for each keyword
 	for _, kw := range keywords {
@@ -2073,17 +2304,17 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 			break
 		}
 	}
-	
+
 	// If no phrase keyword, use the minScore already set based on keyword count
 	// For multi-keyword queries (4+), we already set minScore = 0.5, which is lenient
-	
+
 	filtered := make([]SpecFact, 0)
 	for _, s := range scored {
 		if s.score >= minScore {
 			filtered = append(filtered, s.fact)
 		}
 	}
-	
+
 	// If filtering removed too many results, be more lenient
 	// This is especially important for multi-keyword queries where we want to return facts for each keyword
 	// For multi-keyword queries (4+ non-phrase keywords), be very lenient to return facts for each keyword
@@ -2109,7 +2340,7 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 			}
 		}
 	}
-	
+
 	// If still too strict, return top results by score
 	if len(filtered) == 0 && len(scored) > 0 {
 		// Return top 10 by score
@@ -2132,19 +2363,19 @@ func (r *Router) filterLowRelevanceFacts(facts []SpecFact, keywords []string) []
 			scored = append(scored[:bestIdx], scored[bestIdx+1:]...)
 		}
 	}
-	
+
 	return filtered
 }
 
 // extractKeywords extracts keywords from a query string.
 func (r *Router) extractKeywords(query string) []string {
 	keywords := make([]string, 0)
-	
+
 	// First, extract quoted phrases (they should be treated as single phrase keywords)
 	quotedPhrases := regexp.MustCompile(`"([^"]+)"`)
 	matches := quotedPhrases.FindAllStringSubmatch(query, -1)
 	quotedText := make(map[string]bool)
-	
+
 	// Extract quoted phrases and remove them from the query
 	queryWithoutQuotes := query
 	for _, match := range matches {
@@ -2158,7 +2389,7 @@ func (r *Router) extractKeywords(query string) []string {
 			}
 		}
 	}
-	
+
 	// Now extract individual words from the remaining query (without quoted phrases)
 	words := strings.Fields(strings.ToLower(queryWithoutQuotes))
 
@@ -2198,7 +2429,7 @@ func (r *Router) extractKeywords(query string) []string {
 		"centre":  "center",
 		"centres": "centers",
 	}
-	
+
 	// Track which words are part of quoted phrases (to avoid adding them as individual keywords)
 	wordsInQuotes := make(map[string]bool)
 	for quoted := range quotedText {
@@ -2207,7 +2438,7 @@ func (r *Router) extractKeywords(query string) []string {
 			wordsInQuotes[strings.ToLower(w)] = true
 		}
 	}
-	
+
 	for _, word := range words {
 		// Remove punctuation
 		word = strings.Trim(word, ".,!?;:()[]{}'\"")
@@ -2243,7 +2474,7 @@ func (r *Router) extractKeywords(query string) []string {
 		"color option", "color options", "colour option", "colour options",
 		"paint color", "paint colors", "paint colour", "paint colours",
 	}
-	
+
 	queryLower := strings.ToLower(query)
 	for _, phrase := range phrasePatterns {
 		// Check if this phrase is already in quoted phrases
@@ -2270,4 +2501,3 @@ func min(a, b float64) float64 {
 	}
 	return b
 }
-

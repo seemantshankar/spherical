@@ -4,6 +4,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/cmd/knowledge-engine-api/middleware"
@@ -31,21 +32,21 @@ func NewRetrievalHandler(logger *observability.Logger, router *retrieval.Router,
 
 // RetrievalRequestDTO represents the API request for retrieval.
 type RetrievalRequestDTO struct {
-	TenantID            string                 `json:"tenantId"`
-	ProductIDs          []string               `json:"productIds,omitempty"`
-	CampaignVariantID   string                 `json:"campaignVariantId,omitempty"`
-	Question            string                 `json:"question"`
-	IntentHint          string                 `json:"intentHint,omitempty"`
-	ConversationContext []ConversationMessage  `json:"conversationContext,omitempty"`
-	Filters             *RetrievalFiltersDTO   `json:"filters,omitempty"`
-	MaxChunks           int                    `json:"maxChunks,omitempty"`
-	IncludeLineage      bool                   `json:"includeLineage,omitempty"`
+	TenantID            string                `json:"tenantId"`
+	ProductIDs          []string              `json:"productIds,omitempty"`
+	CampaignVariantID   string                `json:"campaignVariantId,omitempty"`
+	Question            string                `json:"question"`
+	IntentHint          string                `json:"intentHint,omitempty"`
+	ConversationContext []ConversationMessage `json:"conversationContext,omitempty"`
+	Filters             *RetrievalFiltersDTO  `json:"filters,omitempty"`
+	MaxChunks           int                   `json:"maxChunks,omitempty"`
+	IncludeLineage      bool                  `json:"includeLineage,omitempty"`
 	// New: Structured spec name list from LLM
 	RequestedSpecs []string `json:"requestedSpecs,omitempty"`
 	// New: Request mode (natural language vs structured)
-	RequestMode    string `json:"requestMode,omitempty"`
+	RequestMode string `json:"requestMode,omitempty"`
 	// New: Include natural language summary
-	IncludeSummary bool   `json:"includeSummary,omitempty"`
+	IncludeSummary bool `json:"includeSummary,omitempty"`
 }
 
 // ConversationMessage represents a conversation turn.
@@ -62,12 +63,12 @@ type RetrievalFiltersDTO struct {
 
 // RetrievalResponseDTO represents the API response.
 type RetrievalResponseDTO struct {
-	Intent          string           `json:"intent"`
-	LatencyMs       int64            `json:"latencyMs"`
-	StructuredFacts []SpecFactDTO    `json:"structuredFacts"`
+	Intent          string             `json:"intent"`
+	LatencyMs       int64              `json:"latencyMs"`
+	StructuredFacts []SpecFactDTO      `json:"structuredFacts"`
 	SemanticChunks  []SemanticChunkDTO `json:"semanticChunks"`
-	Comparisons     []ComparisonDTO  `json:"comparisons,omitempty"`
-	Lineage         []LineageDTO     `json:"lineage,omitempty"`
+	Comparisons     []ComparisonDTO    `json:"comparisons,omitempty"`
+	Lineage         []LineageDTO       `json:"lineage,omitempty"`
 	// New: Per-spec availability status
 	SpecAvailability []SpecAvailabilityDTO `json:"specAvailability,omitempty"`
 	// New: Overall confidence score
@@ -78,24 +79,28 @@ type RetrievalResponseDTO struct {
 
 // SpecAvailabilityDTO represents availability status for a spec.
 type SpecAvailabilityDTO struct {
-	SpecName        string            `json:"specName"`
-	Status          string            `json:"status"`
-	Confidence      float64           `json:"confidence"`
-	AlternativeNames []string         `json:"alternativeNames,omitempty"`
-	MatchedSpecs    []SpecFactDTO     `json:"matchedSpecs,omitempty"`
-	MatchedChunks   []SemanticChunkDTO `json:"matchedChunks,omitempty"`
+	SpecName         string             `json:"specName"`
+	Status           string             `json:"status"`
+	Confidence       float64            `json:"confidence"`
+	AlternativeNames []string           `json:"alternativeNames,omitempty"`
+	MatchedSpecs     []SpecFactDTO      `json:"matchedSpecs,omitempty"`
+	MatchedChunks    []SemanticChunkDTO `json:"matchedChunks,omitempty"`
 }
 
 // SpecFactDTO represents a structured fact.
 type SpecFactDTO struct {
-	SpecItemID        string    `json:"specItemId"`
-	Category          string    `json:"category"`
-	Name              string    `json:"name"`
-	Value             string    `json:"value"`
-	Unit              string    `json:"unit,omitempty"`
-	Confidence        float64   `json:"confidence"`
-	CampaignVariantID string    `json:"campaignVariantId"`
-	Source            SourceDTO `json:"source"`
+	SpecItemID          string    `json:"specItemId"`
+	Category            string    `json:"category"`
+	Name                string    `json:"name"`
+	Value               string    `json:"value"`
+	Unit                string    `json:"unit,omitempty"`
+	KeyFeatures         string    `json:"keyFeatures,omitempty"`
+	VariantAvailability string    `json:"variantAvailability,omitempty"`
+	Explanation         string    `json:"explanation,omitempty"`
+	Provenance          string    `json:"provenance,omitempty"`
+	Confidence          float64   `json:"confidence"`
+	CampaignVariantID   string    `json:"campaignVariantId"`
+	Source              SourceDTO `json:"source"`
 }
 
 // SemanticChunkDTO represents a semantic chunk.
@@ -259,15 +264,20 @@ func (h *RetrievalHandler) toResponseDTO(resp *retrieval.RetrievalResponse) Retr
 	}
 
 	for _, fact := range resp.StructuredFacts {
+		expl := toSingleLine(fact.Explanation)
 		dto.StructuredFacts = append(dto.StructuredFacts, SpecFactDTO{
-			SpecItemID:        fact.SpecItemID.String(),
-			Category:          fact.Category,
-			Name:              fact.Name,
-			Value:             fact.Value,
-			Unit:              fact.Unit,
-			Confidence:        fact.Confidence,
-			CampaignVariantID: fact.CampaignVariantID.String(),
-			Source:            h.toSourceDTO(fact.Source),
+			SpecItemID:          fact.SpecItemID.String(),
+			Category:            fact.Category,
+			Name:                fact.Name,
+			Value:               fact.Value,
+			Unit:                fact.Unit,
+			KeyFeatures:         fact.KeyFeatures,
+			VariantAvailability: fact.VariantAvailability,
+			Explanation:         expl,
+			Provenance:          fact.Provenance,
+			Confidence:          fact.Confidence,
+			CampaignVariantID:   fact.CampaignVariantID.String(),
+			Source:              h.toSourceDTO(fact.Source),
 		})
 	}
 
@@ -312,24 +322,29 @@ func (h *RetrievalHandler) toResponseDTO(resp *retrieval.RetrievalResponse) Retr
 	dto.SpecAvailability = make([]SpecAvailabilityDTO, 0, len(resp.SpecAvailability))
 	for _, status := range resp.SpecAvailability {
 		statusDTO := SpecAvailabilityDTO{
-			SpecName:        status.SpecName,
-			Status:          string(status.Status),
-			Confidence:      status.Confidence,
+			SpecName:         status.SpecName,
+			Status:           string(status.Status),
+			Confidence:       status.Confidence,
 			AlternativeNames: status.AlternativeNames,
 		}
 
 		// Convert matched specs
 		statusDTO.MatchedSpecs = make([]SpecFactDTO, 0, len(status.MatchedSpecs))
 		for _, fact := range status.MatchedSpecs {
+			expl := toSingleLine(fact.Explanation)
 			statusDTO.MatchedSpecs = append(statusDTO.MatchedSpecs, SpecFactDTO{
-				SpecItemID:        fact.SpecItemID.String(),
-				Category:          fact.Category,
-				Name:              fact.Name,
-				Value:             fact.Value,
-				Unit:              fact.Unit,
-				Confidence:        fact.Confidence,
-				CampaignVariantID: fact.CampaignVariantID.String(),
-				Source:            h.toSourceDTO(fact.Source),
+				SpecItemID:          fact.SpecItemID.String(),
+				Category:            fact.Category,
+				Name:                fact.Name,
+				Value:               fact.Value,
+				Unit:                fact.Unit,
+				KeyFeatures:         fact.KeyFeatures,
+				VariantAvailability: fact.VariantAvailability,
+				Explanation:         expl,
+				Provenance:          fact.Provenance,
+				Confidence:          fact.Confidence,
+				CampaignVariantID:   fact.CampaignVariantID.String(),
+				Source:              h.toSourceDTO(fact.Source),
 			})
 		}
 
@@ -358,6 +373,14 @@ func (h *RetrievalHandler) toResponseDTO(resp *retrieval.RetrievalResponse) Retr
 	return dto
 }
 
+// toSingleLine ensures text is rendered as a single line for block layout.
+func toSingleLine(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
+
 func (h *RetrievalHandler) toSourceDTO(src retrieval.SourceRef) SourceDTO {
 	dto := SourceDTO{}
 	if src.DocumentSourceID != nil {
@@ -384,4 +407,3 @@ func (h *RetrievalHandler) writeError(w http.ResponseWriter, status int, message
 	}
 	json.NewEncoder(w).Encode(resp)
 }
-

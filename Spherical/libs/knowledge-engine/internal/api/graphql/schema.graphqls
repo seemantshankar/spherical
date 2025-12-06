@@ -149,6 +149,8 @@ type SpecFact {
   name: String!
   value: String!
   unit: String
+  keyFeatures: String
+  variantAvailability: String
   confidence: Float!
   campaignVariantId: String!
   source: SourceRef!

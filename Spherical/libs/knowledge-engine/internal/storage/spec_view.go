@@ -36,10 +36,10 @@ type SpecViewQuery struct {
 
 // SpecViewResult contains the query result with cache hints.
 type SpecViewResult struct {
-	Specs       []SpecViewLatest
-	TotalCount  int
-	CacheHint   CacheHint
-	ComputedAt  time.Time
+	Specs      []SpecViewLatest
+	TotalCount int
+	CacheHint  CacheHint
+	ComputedAt time.Time
 }
 
 // CacheHint provides caching guidance for the result.
@@ -61,6 +61,7 @@ func (r *SpecViewRepository) Query(ctx context.Context, q SpecViewQuery) (*SpecV
 		SELECT 
 			sv.id, sv.tenant_id, sv.product_id, sv.campaign_variant_id, sv.spec_item_id,
 			sv.spec_name, sv.category_name, sv.value, sv.unit, sv.confidence,
+			sv.key_features, sv.variant_availability, sv.explanation, sv.explanation_failed,
 			sv.source_doc_id, sv.source_page, sv.version, sv.locale, sv.trim,
 			sv.market, sv.product_name
 		FROM spec_view_latest sv
@@ -150,6 +151,7 @@ func (r *SpecViewRepository) Query(ctx context.Context, q SpecViewQuery) (*SpecV
 		if err := rows.Scan(
 			&sv.ID, &sv.TenantID, &sv.ProductID, &sv.CampaignVariantID, &sv.SpecItemID,
 			&sv.SpecName, &sv.CategoryName, &sv.Value, &sv.Unit, &sv.Confidence,
+			&sv.KeyFeatures, &sv.VariantAvailability, &sv.Explanation, &sv.ExplanationFailed,
 			&sv.SourceDocID, &sv.SourcePage, &sv.Version, &sv.Locale, &sv.Trim,
 			&sv.Market, &sv.ProductName,
 		); err != nil {
@@ -182,6 +184,7 @@ func (r *SpecViewRepository) GetBySpecItem(ctx context.Context, tenantID, produc
 		SELECT 
 			sv.id, sv.tenant_id, sv.product_id, sv.campaign_variant_id, sv.spec_item_id,
 			sv.spec_name, sv.category_name, sv.value, sv.unit, sv.confidence,
+			sv.key_features, sv.variant_availability, sv.explanation, sv.explanation_failed,
 			sv.source_doc_id, sv.source_page, sv.version, sv.locale, sv.trim,
 			sv.market, sv.product_name
 		FROM spec_view_latest sv
@@ -192,6 +195,7 @@ func (r *SpecViewRepository) GetBySpecItem(ctx context.Context, tenantID, produc
 	err := r.db.QueryRowContext(ctx, query, tenantID, productID, campaignVariantID, specItemID).Scan(
 		&sv.ID, &sv.TenantID, &sv.ProductID, &sv.CampaignVariantID, &sv.SpecItemID,
 		&sv.SpecName, &sv.CategoryName, &sv.Value, &sv.Unit, &sv.Confidence,
+		&sv.KeyFeatures, &sv.VariantAvailability, &sv.Explanation, &sv.ExplanationFailed,
 		&sv.SourceDocID, &sv.SourcePage, &sv.Version, &sv.Locale, &sv.Trim,
 		&sv.Market, &sv.ProductName,
 	)
@@ -204,20 +208,44 @@ func (r *SpecViewRepository) GetBySpecItem(ctx context.Context, tenantID, produc
 	return &sv, nil
 }
 
-// SearchByKeyword performs a keyword search across spec names and values.
+// SearchByKeyword performs a keyword search across spec names, values, and categories.
+// Implementation uses base tables (spec_values + joins) to avoid dependency on a materialized view.
 func (r *SpecViewRepository) SearchByKeyword(ctx context.Context, tenantID uuid.UUID, keyword string, limit int) ([]SpecViewLatest, error) {
 	query := `
 		SELECT 
-			sv.id, sv.tenant_id, sv.product_id, sv.campaign_variant_id, sv.spec_item_id,
-			sv.spec_name, sv.category_name, sv.value, sv.unit, sv.confidence,
-			sv.source_doc_id, sv.source_page, sv.version, sv.locale, sv.trim,
-			sv.market, sv.product_name
-		FROM spec_view_latest sv
-		WHERE sv.tenant_id = $1 
-			AND (UPPER(sv.spec_name) LIKE '%' || UPPER($2) || '%' 
-			     OR UPPER(sv.value) LIKE '%' || UPPER($2) || '%'
-			     OR UPPER(sv.category_name) LIKE '%' || UPPER($2) || '%')
-		ORDER BY sv.confidence DESC, sv.spec_name
+			sv.id,
+			sv.tenant_id,
+			sv.product_id,
+			sv.campaign_variant_id,
+			sv.spec_item_id,
+			si.display_name AS spec_name,
+			sc.name AS category_name,
+			COALESCE(sv.value_text, CAST(sv.value_numeric AS TEXT)) AS value,
+			sv.unit,
+			sv.confidence,
+			sv.key_features,
+			sv.variant_availability,
+			sv.explanation,
+			sv.explanation_failed,
+			sv.source_doc_id,
+			sv.source_page,
+			sv.version,
+			cv.locale,
+			cv.trim,
+			cv.market,
+			p.name AS product_name
+		FROM spec_values sv
+		JOIN spec_items si ON sv.spec_item_id = si.id
+		JOIN spec_categories sc ON si.category_id = sc.id
+		JOIN campaign_variants cv ON sv.campaign_variant_id = cv.id
+		JOIN products p ON sv.product_id = p.id
+		WHERE sv.tenant_id = $1
+		  AND (
+			  UPPER(si.display_name)    LIKE '%' || UPPER($2) || '%' OR
+			  UPPER(sc.name)            LIKE '%' || UPPER($2) || '%' OR
+			  UPPER(COALESCE(sv.value_text, CAST(sv.value_numeric AS TEXT))) LIKE '%' || UPPER($2) || '%'
+		  )
+		ORDER BY sv.confidence DESC, si.display_name
 		LIMIT $3
 	`
 	if limit <= 0 {
@@ -236,6 +264,7 @@ func (r *SpecViewRepository) SearchByKeyword(ctx context.Context, tenantID uuid.
 		if err := rows.Scan(
 			&sv.ID, &sv.TenantID, &sv.ProductID, &sv.CampaignVariantID, &sv.SpecItemID,
 			&sv.SpecName, &sv.CategoryName, &sv.Value, &sv.Unit, &sv.Confidence,
+			&sv.KeyFeatures, &sv.VariantAvailability, &sv.Explanation, &sv.ExplanationFailed,
 			&sv.SourceDocID, &sv.SourcePage, &sv.Version, &sv.Locale, &sv.Trim,
 			&sv.Market, &sv.ProductName,
 		); err != nil {
@@ -308,4 +337,3 @@ func (r *SpecViewRepository) RefreshView(ctx context.Context) error {
 	_, err := r.db.ExecContext(ctx, "SELECT 1") // Placeholder
 	return err
 }
-

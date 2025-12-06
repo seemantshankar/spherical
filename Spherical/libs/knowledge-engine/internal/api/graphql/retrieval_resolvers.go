@@ -3,6 +3,7 @@ package graphql
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spherical-ai/spherical/libs/knowledge-engine/internal/monitoring"
@@ -29,20 +30,20 @@ func NewRetrievalResolver(logger *observability.Logger, router *retrieval.Router
 
 // RetrievalQueryInput represents the GraphQL input for retrieval queries.
 type RetrievalQueryInput struct {
-	TenantID          string           `json:"tenantId"`
-	ProductIDs        []string         `json:"productIds"`
-	CampaignVariantID *string          `json:"campaignVariantId,omitempty"`
-	Question          string           `json:"question"`
-	IntentHint        *string          `json:"intentHint,omitempty"`
-	Filters           *FilterInput     `json:"filters,omitempty"`
-	MaxChunks         *int             `json:"maxChunks,omitempty"`
-	IncludeLineage    *bool            `json:"includeLineage,omitempty"`
+	TenantID          string       `json:"tenantId"`
+	ProductIDs        []string     `json:"productIds"`
+	CampaignVariantID *string      `json:"campaignVariantId,omitempty"`
+	Question          string       `json:"question"`
+	IntentHint        *string      `json:"intentHint,omitempty"`
+	Filters           *FilterInput `json:"filters,omitempty"`
+	MaxChunks         *int         `json:"maxChunks,omitempty"`
+	IncludeLineage    *bool        `json:"includeLineage,omitempty"`
 	// New: Structured spec name list from LLM
 	RequestedSpecs []string `json:"requestedSpecs,omitempty"`
 	// New: Request mode (natural language vs structured)
-	RequestMode    *string `json:"requestMode,omitempty"`
+	RequestMode *string `json:"requestMode,omitempty"`
 	// New: Include natural language summary
-	IncludeSummary *bool   `json:"includeSummary,omitempty"`
+	IncludeSummary *bool `json:"includeSummary,omitempty"`
 }
 
 // FilterInput represents retrieval filters.
@@ -69,24 +70,28 @@ type RetrievalResult struct {
 
 // SpecAvailabilityResult represents availability status for a spec.
 type SpecAvailabilityResult struct {
-	SpecName        string            `json:"specName"`
-	Status          string            `json:"status"`
-	Confidence      float64           `json:"confidence"`
-	AlternativeNames []string         `json:"alternativeNames,omitempty"`
-	MatchedSpecs    []*SpecFactResult `json:"matchedSpecs,omitempty"`
-	MatchedChunks   []*ChunkResult    `json:"matchedChunks,omitempty"`
+	SpecName         string            `json:"specName"`
+	Status           string            `json:"status"`
+	Confidence       float64           `json:"confidence"`
+	AlternativeNames []string          `json:"alternativeNames,omitempty"`
+	MatchedSpecs     []*SpecFactResult `json:"matchedSpecs,omitempty"`
+	MatchedChunks    []*ChunkResult    `json:"matchedChunks,omitempty"`
 }
 
 // SpecFactResult represents a structured spec fact.
 type SpecFactResult struct {
-	ID                string        `json:"id"`
-	Category          string        `json:"category"`
-	Name              string        `json:"name"`
-	Value             string        `json:"value"`
-	Unit              *string       `json:"unit,omitempty"`
-	Confidence        float64       `json:"confidence"`
-	CampaignVariantID string        `json:"campaignVariantId"`
-	Source            *SourceResult `json:"source,omitempty"`
+	ID                  string        `json:"id"`
+	Category            string        `json:"category"`
+	Name                string        `json:"name"`
+	Value               string        `json:"value"`
+	Unit                *string       `json:"unit,omitempty"`
+	KeyFeatures         *string       `json:"keyFeatures,omitempty"`
+	VariantAvailability *string       `json:"variantAvailability,omitempty"`
+	Explanation         *string       `json:"explanation,omitempty"`
+	Provenance          string        `json:"provenance"`
+	Confidence          float64       `json:"confidence"`
+	CampaignVariantID   string        `json:"campaignVariantId"`
+	Source              *SourceResult `json:"source,omitempty"`
 }
 
 // ChunkResult represents a semantic chunk.
@@ -228,15 +233,31 @@ func (r *RetrievalResolver) toGraphQLResult(resp *retrieval.RetrievalResponse) *
 	}
 
 	for _, fact := range resp.StructuredFacts {
+		var keyFeaturesPtr *string
+		if strings.TrimSpace(fact.KeyFeatures) != "" {
+			keyFeaturesPtr = &fact.KeyFeatures
+		}
+		var variantAvailPtr *string
+		if strings.TrimSpace(fact.VariantAvailability) != "" {
+			variantAvailPtr = &fact.VariantAvailability
+		}
+		var explanationPtr *string
+		if strings.TrimSpace(fact.Explanation) != "" {
+			explanationPtr = &fact.Explanation
+		}
 		result.StructuredFacts = append(result.StructuredFacts, &SpecFactResult{
-			ID:                fact.SpecItemID.String(),
-			Category:          fact.Category,
-			Name:              fact.Name,
-			Value:             fact.Value,
-			Unit:              nilIfEmpty(fact.Unit),
-			Confidence:        fact.Confidence,
-			CampaignVariantID: fact.CampaignVariantID.String(),
-			Source:            r.toSourceResult(fact.Source),
+			ID:                  fact.SpecItemID.String(),
+			Category:            fact.Category,
+			Name:                fact.Name,
+			Value:               fact.Value,
+			Unit:                nilIfEmpty(fact.Unit),
+			KeyFeatures:         keyFeaturesPtr,
+			VariantAvailability: variantAvailPtr,
+			Explanation:         explanationPtr,
+			Provenance:          fact.Provenance,
+			Confidence:          fact.Confidence,
+			CampaignVariantID:   fact.CampaignVariantID.String(),
+			Source:              r.toSourceResult(fact.Source),
 		})
 	}
 
@@ -282,9 +303,9 @@ func (r *RetrievalResolver) toGraphQLResult(resp *retrieval.RetrievalResponse) *
 	result.SpecAvailability = make([]*SpecAvailabilityResult, 0, len(resp.SpecAvailability))
 	for _, status := range resp.SpecAvailability {
 		grpcStatus := &SpecAvailabilityResult{
-			SpecName:        status.SpecName,
-			Status:          string(status.Status),
-			Confidence:      status.Confidence,
+			SpecName:         status.SpecName,
+			Status:           string(status.Status),
+			Confidence:       status.Confidence,
 			AlternativeNames: status.AlternativeNames,
 		}
 
@@ -297,6 +318,8 @@ func (r *RetrievalResolver) toGraphQLResult(resp *retrieval.RetrievalResponse) *
 				Name:              fact.Name,
 				Value:             fact.Value,
 				Unit:              nilIfEmpty(fact.Unit),
+				Explanation:       nilIfEmpty(fact.Explanation),
+				Provenance:        fact.Provenance,
 				Confidence:        fact.Confidence,
 				CampaignVariantID: fact.CampaignVariantID.String(),
 				Source:            r.toSourceResult(fact.Source),
@@ -349,4 +372,3 @@ func nilIfEmpty(s string) *string {
 	}
 	return &s
 }
-

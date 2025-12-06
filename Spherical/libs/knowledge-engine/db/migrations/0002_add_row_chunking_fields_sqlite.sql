@@ -5,6 +5,8 @@
 -- ============================================================================
 -- Add content_hash column for content-based deduplication
 -- ============================================================================
+-- Note: SQLite doesn't support IF NOT EXISTS for ADD COLUMN.
+-- The migration runner will handle duplicate column errors gracefully.
 
 ALTER TABLE knowledge_chunks 
 ADD COLUMN content_hash TEXT;

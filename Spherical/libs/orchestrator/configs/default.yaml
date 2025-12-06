@@ -1,0 +1,20 @@
+orchestrator:
+  # Vector store root - defaults to persistent location (~/.orchestrator/vector-stores)
+  # Override with ORCHESTRATOR_VECTOR_STORE_ROOT env var
+  vector_store_root: "" # Auto-set to persistent location if empty
+  temp_dir: "/tmp/orchestrator-temp" # Temporary files only
+  bin_dir: "./bin"
+  repo_root: "" # Auto-detected if empty
+  data_dir: "" # Persistent data directory - defaults to ~/.orchestrator or ./data
+
+knowledge_engine:
+  config_path: "" # Path to knowledge-engine config YAML, or empty to use defaults
+  database_path: "" # Override database path if needed (defaults to persistent location)
+
+extraction:
+  model: "google/gemini-2.5-flash-preview-09-2025" # Override LLM_MODEL env
+
+ingestion:
+  embedding_batch_size: 75
+  auto_publish: false
+

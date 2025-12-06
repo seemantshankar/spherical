@@ -58,6 +58,7 @@ type ChunkType string
 
 const (
 	ChunkTypeSpecRow      ChunkType = "spec_row"
+	ChunkTypeSpecFact     ChunkType = "spec_fact"
 	ChunkTypeFeatureBlock ChunkType = "feature_block"
 	ChunkTypeUSP          ChunkType = "usp"
 	ChunkTypeFAQ          ChunkType = "faq"
@@ -202,23 +203,27 @@ type SpecItem struct {
 
 // SpecValue represents a concrete spec measurement for a campaign.
 type SpecValue struct {
-	ID                uuid.UUID  `json:"id" db:"id"`
-	TenantID          uuid.UUID  `json:"tenant_id" db:"tenant_id"`
-	ProductID         uuid.UUID  `json:"product_id" db:"product_id"`
-	CampaignVariantID uuid.UUID  `json:"campaign_variant_id" db:"campaign_variant_id"`
-	SpecItemID        uuid.UUID  `json:"spec_item_id" db:"spec_item_id"`
-	ValueNumeric      *float64   `json:"value_numeric,omitempty" db:"value_numeric"`
-	ValueText         *string    `json:"value_text,omitempty" db:"value_text"`
-	Unit              *string    `json:"unit,omitempty" db:"unit"`
-	Confidence        float64    `json:"confidence" db:"confidence"`
-	Status            SpecStatus `json:"status" db:"status"`
-	SourceDocID       *uuid.UUID `json:"source_doc_id,omitempty" db:"source_doc_id"`
-	SourcePage        *int       `json:"source_page,omitempty" db:"source_page"`
-	Version           int        `json:"version" db:"version"`
-	EffectiveFrom     *time.Time `json:"effective_from,omitempty" db:"effective_from"`
-	EffectiveThrough  *time.Time `json:"effective_through,omitempty" db:"effective_through"`
-	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
+	ID                  uuid.UUID  `json:"id" db:"id"`
+	TenantID            uuid.UUID  `json:"tenant_id" db:"tenant_id"`
+	ProductID           uuid.UUID  `json:"product_id" db:"product_id"`
+	CampaignVariantID   uuid.UUID  `json:"campaign_variant_id" db:"campaign_variant_id"`
+	SpecItemID          uuid.UUID  `json:"spec_item_id" db:"spec_item_id"`
+	ValueNumeric        *float64   `json:"value_numeric,omitempty" db:"value_numeric"`
+	ValueText           *string    `json:"value_text,omitempty" db:"value_text"`
+	Unit                *string    `json:"unit,omitempty" db:"unit"`
+	KeyFeatures         *string    `json:"key_features,omitempty" db:"key_features"`
+	VariantAvailability *string    `json:"variant_availability,omitempty" db:"variant_availability"`
+	Explanation         *string    `json:"explanation,omitempty" db:"explanation"`
+	ExplanationFailed   bool       `json:"explanation_failed" db:"explanation_failed"`
+	Confidence          float64    `json:"confidence" db:"confidence"`
+	Status              SpecStatus `json:"status" db:"status"`
+	SourceDocID         *uuid.UUID `json:"source_doc_id,omitempty" db:"source_doc_id"`
+	SourcePage          *int       `json:"source_page,omitempty" db:"source_page"`
+	Version             int        `json:"version" db:"version"`
+	EffectiveFrom       *time.Time `json:"effective_from,omitempty" db:"effective_from"`
+	EffectiveThrough    *time.Time `json:"effective_through,omitempty" db:"effective_through"`
+	CreatedAt           time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // FeatureBlock represents a marketing bullet or USP.
@@ -259,6 +264,23 @@ type KnowledgeChunk struct {
 	Visibility        Visibility      `json:"visibility" db:"visibility"`
 	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// SpecFactChunk represents a semantic spec fact chunk and its embedding.
+type SpecFactChunk struct {
+	ID                uuid.UUID `json:"id" db:"id"`
+	TenantID          uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	ProductID         uuid.UUID `json:"product_id" db:"product_id"`
+	CampaignVariantID uuid.UUID `json:"campaign_variant_id" db:"campaign_variant_id"`
+	SpecValueID       uuid.UUID `json:"spec_value_id" db:"spec_value_id"`
+	ChunkText         string    `json:"chunk_text" db:"chunk_text"`
+	Gloss             *string   `json:"gloss,omitempty" db:"gloss"`
+	EmbeddingVector   []float32 `json:"embedding_vector,omitempty" db:"embedding_vector"`
+	EmbeddingModel    *string   `json:"embedding_model,omitempty" db:"embedding_model"`
+	EmbeddingVersion  *string   `json:"embedding_version,omitempty" db:"embedding_version"`
+	Source            string    `json:"source" db:"source"`
+	CreatedAt         time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ComparisonRow represents a pre-computed comparison between products.
@@ -322,22 +344,25 @@ type DriftAlert struct {
 
 // SpecViewLatest represents the materialized view of latest spec values.
 type SpecViewLatest struct {
-	ID                uuid.UUID `json:"id" db:"id"`
-	TenantID          uuid.UUID `json:"tenant_id" db:"tenant_id"`
-	ProductID         uuid.UUID `json:"product_id" db:"product_id"`
-	CampaignVariantID uuid.UUID `json:"campaign_variant_id" db:"campaign_variant_id"`
-	SpecItemID        uuid.UUID `json:"spec_item_id" db:"spec_item_id"`
-	SpecName          string    `json:"spec_name" db:"spec_name"`
-	CategoryName      string    `json:"category_name" db:"category_name"`
-	Value             string    `json:"value" db:"value"`
-	Unit              *string   `json:"unit,omitempty" db:"unit"`
-	Confidence        float64   `json:"confidence" db:"confidence"`
-	SourceDocID       *uuid.UUID `json:"source_doc_id,omitempty" db:"source_doc_id"`
-	SourcePage        *int      `json:"source_page,omitempty" db:"source_page"`
-	Version           int       `json:"version" db:"version"`
-	Locale            string    `json:"locale" db:"locale"`
-	Trim              *string   `json:"trim,omitempty" db:"trim"`
-	Market            *string   `json:"market,omitempty" db:"market"`
-	ProductName       string    `json:"product_name" db:"product_name"`
+	ID                  uuid.UUID  `json:"id" db:"id"`
+	TenantID            uuid.UUID  `json:"tenant_id" db:"tenant_id"`
+	ProductID           uuid.UUID  `json:"product_id" db:"product_id"`
+	CampaignVariantID   uuid.UUID  `json:"campaign_variant_id" db:"campaign_variant_id"`
+	SpecItemID          uuid.UUID  `json:"spec_item_id" db:"spec_item_id"`
+	SpecName            string     `json:"spec_name" db:"spec_name"`
+	CategoryName        string     `json:"category_name" db:"category_name"`
+	Value               string     `json:"value" db:"value"`
+	Unit                *string    `json:"unit,omitempty" db:"unit"`
+	KeyFeatures         *string    `json:"key_features,omitempty" db:"key_features"`
+	VariantAvailability *string    `json:"variant_availability,omitempty" db:"variant_availability"`
+	Explanation         *string    `json:"explanation,omitempty" db:"explanation"`
+	ExplanationFailed   bool       `json:"explanation_failed" db:"explanation_failed"`
+	Confidence          float64    `json:"confidence" db:"confidence"`
+	SourceDocID         *uuid.UUID `json:"source_doc_id,omitempty" db:"source_doc_id"`
+	SourcePage          *int       `json:"source_page,omitempty" db:"source_page"`
+	Version             int        `json:"version" db:"version"`
+	Locale              string     `json:"locale" db:"locale"`
+	Trim                *string    `json:"trim,omitempty" db:"trim"`
+	Market              *string    `json:"market,omitempty" db:"market"`
+	ProductName         string     `json:"product_name" db:"product_name"`
 }
-

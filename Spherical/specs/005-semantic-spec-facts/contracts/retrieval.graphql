@@ -1,0 +1,33 @@
+# GraphQL contract additions for semantic spec facts
+
+type SpecFact {
+  id: ID!
+  category: String!
+  name: String!
+  value: String!
+  unit: String
+  keyFeatures: String
+  variantAvailability: String
+  explanation: String! # single sentence; sanitized to first sentence, <=160 chars
+  gloss: String
+  confidence: Float!
+  provenance: String! # keyword | semantic
+}
+
+type SpecFactResult {
+  fact: SpecFact!
+  score: Float!
+}
+
+type Query {
+  semanticSpecFacts(query: String!, topK: Int = 10, keywordConfidence: Float, variant: String): [SpecFactResult!]!
+}
+
+type Mutation {
+  ingestSpecFacts(sourceId: ID!, dryRun: Boolean = false): Boolean!
+}
+
+# Behavior notes:
+# - keyword path remains primary; when keywordConfidence is low or no results, server falls back to semanticSpecFacts vector search.
+# - explanation is stored per spec_value row and returned as a single sentence derived only from row fields.
+# - gloss is optional additional clarifying sentence included in chunk_text when helpful.

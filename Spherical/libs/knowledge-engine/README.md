@@ -10,6 +10,7 @@ A semantic knowledge engine for extracting, storing, and retrieving structured i
 - **Content Deduplication**: Content hash-based deduplication across documents
 - **Hierarchical Grouping**: Group query results by category hierarchy
 - **Batch Processing**: Efficient batch embedding generation for large tables
+- **Guardrails & Explanations**: Single-sentence, sanitized explanations with fallback markers; semantic fallback triggers on low keyword confidence.
 
 ## Row-Level Chunking
 
@@ -226,6 +227,16 @@ psql -d your_db -f db/migrations/0002_add_row_chunking_fields.sql
 # SQLite
 sqlite3 your_db.db < db/migrations/0002_add_row_chunking_fields_sqlite.sql
 ```
+
+### Migration & Rollout (Semantic Spec Facts)
+
+1. Apply the semantic spec_fact migrations (`task migrate` for SQLite) to add explanation/spec_fact chunk storage.
+2. Rebuild/sync FAISS indexes per campaign so spec_fact embeddings (with explanations/provenance) load into the vector store.
+3. Deploy API/retrieval; explanations are sanitized on read (first sentence, <=160 chars) and semantic fallback is gated by keyword confidence.
+4. Smoke tests:
+   - Ingest a sample sheet; verify `explanation_failed` is set for rows that violate guardrails.
+   - Call retrieval with low-keyword queries and confirm single-line explanations.
+   - Performance/regression: `go test ./libs/knowledge-engine/tests/integration -run TestStructuredRetrieval_RealisticPerformance`.
 
 ### See Also
 

@@ -34,13 +34,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 // QueryRequest represents a retrieval query request.
 type QueryRequest struct {
-	TenantID    string   `json:"tenantId"`
-	ProductIDs  []string `json:"productIds,omitempty"`
-	CampaignID  string   `json:"campaignVariantId,omitempty"`
-	Question    string   `json:"question"`
-	IntentHint  string   `json:"intentHint,omitempty"`
-	MaxChunks   int      `json:"maxChunks,omitempty"`
-	IncludeLineage bool  `json:"includeLineage,omitempty"`
+	TenantID       string   `json:"tenantId"`
+	ProductIDs     []string `json:"productIds,omitempty"`
+	CampaignID     string   `json:"campaignVariantId,omitempty"`
+	Question       string   `json:"question"`
+	IntentHint     string   `json:"intentHint,omitempty"`
+	MaxChunks      int      `json:"maxChunks,omitempty"`
+	IncludeLineage bool     `json:"includeLineage,omitempty"`
 }
 
 // QueryResponse represents a retrieval query response.
@@ -55,14 +55,18 @@ type QueryResponse struct {
 
 // SpecFact represents a structured specification fact.
 type SpecFact struct {
-	SpecItemID string  `json:"specItemId"`
-	Category   string  `json:"category"`
-	Name       string  `json:"name"`
-	Value      string  `json:"value"`
-	Unit       string  `json:"unit,omitempty"`
-	Confidence float64 `json:"confidence"`
-	CampaignID string  `json:"campaignVariantId"`
-	Source     Source  `json:"source"`
+	SpecItemID          string  `json:"specItemId"`
+	Category            string  `json:"category"`
+	Name                string  `json:"name"`
+	Value               string  `json:"value"`
+	Unit                string  `json:"unit,omitempty"`
+	KeyFeatures         string  `json:"keyFeatures,omitempty"`
+	VariantAvailability string  `json:"variantAvailability,omitempty"`
+	Explanation         string  `json:"explanation,omitempty"`
+	Provenance          string  `json:"provenance,omitempty"`
+	Confidence          float64 `json:"confidence"`
+	CampaignID          string  `json:"campaignVariantId"`
+	Source              Source  `json:"source"`
 }
 
 // Chunk represents a semantic chunk.
@@ -147,13 +151,13 @@ func (c *Client) GetLineage(ctx context.Context, tenantID, resourceType, resourc
 
 // IngestRequest represents an ingestion request.
 type IngestRequest struct {
-	TenantID     string `json:"tenantId"`
-	ProductID    string `json:"productId"`
-	CampaignID   string `json:"campaignId"`
-	MarkdownURL  string `json:"markdownUrl"`
-	OverwriteDraft bool `json:"overwriteDraft,omitempty"`
-	AutoPublish  bool   `json:"autoPublish,omitempty"`
-	Operator     string `json:"operator"`
+	TenantID       string `json:"tenantId"`
+	ProductID      string `json:"productId"`
+	CampaignID     string `json:"campaignId"`
+	MarkdownURL    string `json:"markdownUrl"`
+	OverwriteDraft bool   `json:"overwriteDraft,omitempty"`
+	AutoPublish    bool   `json:"autoPublish,omitempty"`
+	Operator       string `json:"operator"`
 }
 
 // IngestResponse represents an ingestion response.
@@ -184,9 +188,9 @@ type PublishRequest struct {
 
 // PublishResponse represents a publish response.
 type PublishResponse struct {
-	CampaignID  string `json:"campaignId"`
-	Version     int    `json:"version"`
-	Status      string `json:"status"`
+	CampaignID    string `json:"campaignId"`
+	Version       int    `json:"version"`
+	Status        string `json:"status"`
 	EffectiveFrom string `json:"effectiveFrom"`
 }
 
@@ -199,10 +203,10 @@ func (c *Client) Publish(ctx context.Context, req PublishRequest) (*PublishRespo
 
 // HealthResponse represents a health check response.
 type HealthResponse struct {
-	Status    string `json:"status"`
-	Database  string `json:"database"`
-	Vector    string `json:"vector"`
-	Cache     string `json:"cache"`
+	Status   string `json:"status"`
+	Database string `json:"database"`
+	Vector   string `json:"vector"`
+	Cache    string `json:"cache"`
 }
 
 // Health checks the service health.
@@ -213,4 +217,3 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 		Status: "ok",
 	}, nil
 }
-

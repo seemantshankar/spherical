@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,13 +34,15 @@ type Pipeline struct {
 
 // PipelineConfig holds pipeline configuration.
 type PipelineConfig struct {
-	PDFExtractorPath  string
-	ChunkSize         int
-	ChunkOverlap      int
-	DedupeThreshold   float64
-	MaxConcurrentJobs int
+	PDFExtractorPath   string
+	ChunkSize          int
+	ChunkOverlap       int
+	DedupeThreshold    float64
+	MaxConcurrentJobs  int
 	EmbeddingBatchSize int // Batch size for embedding generation (default: 75)
 }
+
+const maxExplanationLength = 200
 
 // IngestionRequest represents a request to ingest a brochure.
 type IngestionRequest struct {
@@ -91,6 +94,64 @@ func NewPipeline(
 		vectorAdapter: vectorAdapter,
 		lineageWriter: lineageWriter,
 	}
+}
+
+// enforceSingleSentence ensures the text is a single sentence, <= maxExplanationLength,
+// with normalized spacing and trailing punctuation.
+func enforceSingleSentence(text string) (string, error) {
+	normalized := strings.TrimSpace(text)
+	normalized = strings.ReplaceAll(normalized, "\n", " ")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "" {
+		return "", fmt.Errorf("explanation is empty")
+	}
+	if len(normalized) > maxExplanationLength {
+		return "", fmt.Errorf("explanation exceeds %d characters", maxExplanationLength)
+	}
+
+	// Reject multiple sentence terminators
+	terminators := 0
+	for _, ch := range normalized {
+		if ch == '.' || ch == '!' || ch == '?' {
+			terminators++
+		}
+	}
+	if terminators > 1 {
+		return "", fmt.Errorf("explanation must be a single sentence")
+	}
+
+	// Ensure it ends with punctuation
+	if !strings.HasSuffix(normalized, ".") && !strings.HasSuffix(normalized, "!") && !strings.HasSuffix(normalized, "?") {
+		normalized += "."
+	}
+
+	return normalized, nil
+}
+
+// buildSpecExplanation creates a single-sentence, field-bounded explanation.
+// Returns explanation text and a flag indicating if generation failed.
+func buildSpecExplanation(spec ParsedSpec) (string, bool) {
+	valuePart := spec.Value
+	if spec.Unit != "" {
+		valuePart = fmt.Sprintf("%s %s", spec.Value, spec.Unit)
+	}
+
+	parts := []string{
+		fmt.Sprintf("%s %s is %s", strings.TrimSpace(spec.Category), strings.TrimSpace(spec.Name), strings.TrimSpace(valuePart)),
+	}
+	if strings.TrimSpace(spec.KeyFeatures) != "" {
+		parts = append(parts, fmt.Sprintf("Key features: %s", strings.TrimSpace(spec.KeyFeatures)))
+	}
+	if strings.TrimSpace(spec.VariantAvailability) != "" {
+		parts = append(parts, fmt.Sprintf("Availability: %s", strings.TrimSpace(spec.VariantAvailability)))
+	}
+
+	text := strings.Join(parts, "; ")
+	explanation, err := enforceSingleSentence(text)
+	if err != nil {
+		return "", true
+	}
+	return explanation, false
 }
 
 // Ingest processes a brochure and stores the extracted content.
@@ -323,6 +384,7 @@ type SpecsResult struct {
 // storeSpecs persists spec values, handling deduplication and conflicts.
 func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs []ParsedSpec, docSourceID uuid.UUID) (*SpecsResult, error) {
 	result := &SpecsResult{}
+	explanationFailedCount := 0
 
 	if p.repos == nil {
 		return result, fmt.Errorf("repositories not initialized")
@@ -354,8 +416,8 @@ func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs [
 			continue
 		}
 
-		// Generate deterministic ID
-		specID := GenerateSpecID(req.TenantID, req.ProductID, spec.Category, spec.Name)
+		// Generate deterministic ID (include value and campaign to avoid cross-campaign collisions)
+		specID := GenerateSpecID(req.TenantID, req.ProductID, req.CampaignID, spec.Category, spec.Name, spec.Value)
 
 		// Check for existing spec with same ID
 		existingSpecs, err := p.repos.SpecValues.GetByCampaign(ctx, req.TenantID, req.CampaignID)
@@ -372,18 +434,37 @@ func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs [
 		}
 
 		specValue := &storage.SpecValue{
-			ID:                specID,
-			TenantID:          req.TenantID,
-			ProductID:         req.ProductID,
-			CampaignVariantID: req.CampaignID,
-			SpecItemID:        specItem.ID,
-			ValueText:         &spec.Value,
-			Unit:              unitPtr,
-			Confidence:        spec.Confidence,
-			Status:            storage.SpecStatusActive,
-			SourceDocID:       &docSourceID,
-			SourcePage:        &spec.SourcePage,
-			Version:           1,
+			ID:                  specID,
+			TenantID:            req.TenantID,
+			ProductID:           req.ProductID,
+			CampaignVariantID:   req.CampaignID,
+			SpecItemID:          specItem.ID,
+			ValueText:           &spec.Value,
+			Unit:                unitPtr,
+			KeyFeatures:         toNullableString(spec.KeyFeatures),
+			VariantAvailability: toNullableString(spec.VariantAvailability),
+			Explanation:         nil,
+			ExplanationFailed:   false,
+			Confidence:          spec.Confidence,
+			Status:              storage.SpecStatusActive,
+			SourceDocID:         &docSourceID,
+			SourcePage:          &spec.SourcePage,
+			Version:             1,
+		}
+
+		// Generate explanation
+		var explanation string
+		if exp, failed := buildSpecExplanation(spec); failed {
+			specValue.ExplanationFailed = true
+			explanationFailedCount++
+			p.logger.Warn().
+				Str("spec_id", specID.String()).
+				Str("category", spec.Category).
+				Str("name", spec.Name).
+				Msg("Explanation generation failed; marking explanation_failed")
+		} else {
+			explanation = exp
+			specValue.Explanation = toNullableString(explanation)
 		}
 
 		if spec.Numeric != nil {
@@ -426,6 +507,74 @@ func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs [
 			continue
 		}
 
+		// Build spec_fact chunk text
+		chunkText := buildSpecFactChunkText(spec, "")
+
+		var embeddingVec []float32
+		var embeddingModel *string
+		var embeddingVersion *string
+
+		if p.embedder != nil {
+			embs, err := p.embedder.Embed(ctx, []string{chunkText})
+			if err != nil {
+				p.logger.Warn().Err(err).Msg("Failed to embed spec_fact chunk")
+			} else if len(embs) > 0 && len(embs[0]) > 0 {
+				embeddingVec = embs[0]
+				model := p.embedder.Model()
+				embeddingModel = &model
+				embeddingVersion = &model
+			}
+		}
+
+		// Persist spec_fact chunk
+		if p.repos.SpecFactChunks != nil {
+			specFact := &storage.SpecFactChunk{
+				TenantID:          req.TenantID,
+				ProductID:         req.ProductID,
+				CampaignVariantID: req.CampaignID,
+				SpecValueID:       specID,
+				ChunkText:         chunkText,
+				Gloss:             nil,
+				EmbeddingVector:   embeddingVec,
+				EmbeddingModel:    embeddingModel,
+				EmbeddingVersion:  embeddingVersion,
+				Source:            "ingest",
+			}
+			if err := p.repos.SpecFactChunks.Create(ctx, specFact); err != nil {
+				p.logger.Warn().
+					Err(err).
+					Str("spec_value_id", specID.String()).
+					Msg("Failed to persist spec_fact chunk")
+			} else if p.vectorAdapter != nil && len(embeddingVec) > 0 {
+				err := p.vectorAdapter.Insert(ctx, []retrieval.VectorEntry{
+					{
+						ID:                specFact.ID,
+						TenantID:          specFact.TenantID,
+						ProductID:         specFact.ProductID,
+						CampaignVariantID: &specFact.CampaignVariantID,
+						ChunkType:         string(storage.ChunkTypeSpecFact),
+						Visibility:        string(storage.VisibilityPrivate),
+						EmbeddingVersion:  toStringOrDefault(embeddingVersion),
+						Vector:            embeddingVec,
+						Metadata: map[string]interface{}{
+							"chunk_text":           chunkText,
+							"spec_value_id":        specID.String(),
+							"category":             spec.Category,
+							"name":                 spec.Name,
+							"value":                spec.Value,
+							"unit":                 spec.Unit,
+							"key_features":         spec.KeyFeatures,
+							"variant_availability": spec.VariantAvailability,
+							"explanation":          explanation,
+						},
+					},
+				})
+				if err != nil {
+					p.logger.Warn().Err(err).Msg("Failed to insert spec_fact vector")
+				}
+			}
+		}
+
 		// Record lineage event
 		if p.lineageWriter != nil {
 			_ = p.lineageWriter.RecordSpecCreation(ctx, req.TenantID, req.ProductID, req.CampaignID, specID, &docSourceID, nil)
@@ -437,6 +586,12 @@ func (p *Pipeline) storeSpecs(ctx context.Context, req IngestionRequest, specs [
 			Str("name", spec.Name).
 			Str("value", spec.Value).
 			Msg("Persisted spec value")
+	}
+
+	if explanationFailedCount > 0 {
+		p.logger.Info().
+			Int("failed_explanations", explanationFailedCount).
+			Msg("Guardrails triggered during explanation generation")
 	}
 
 	return result, nil
@@ -559,7 +714,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 
 	var embeddings [][]float32
 	embeddingErrors := make(map[int]error) // Track which chunks failed
-	
+
 	if p.embedder != nil && len(chunks) > 0 {
 		texts := make([]string, len(chunks))
 		for i, chunk := range chunks {
@@ -577,7 +732,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 					Int("chunk_count", len(chunks)).
 					Int("batch_size", batchSize).
 					Msg("Batch embedding failed, falling back to individual chunk processing")
-				
+
 				// Fallback to individual chunk embedding
 				embeddings = make([][]float32, len(chunks))
 				for i, text := range texts {
@@ -643,7 +798,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 				contentHash = &hashVal
 			}
 		}
-		
+
 		// For row chunks with content_hash, check for existing chunk (deduplication)
 		var existingChunk *storage.KnowledgeChunk
 		if contentHash != nil && chunk.ChunkType == storage.ChunkTypeSpecRow {
@@ -656,7 +811,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 					Msg("Found existing chunk with same content hash")
 			}
 		}
-		
+
 		// Serialize metadata to JSON and add parsed_spec_ids for row chunks
 		var metadataJSON json.RawMessage
 		metadataMap := make(map[string]interface{})
@@ -666,7 +821,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 				metadataMap[k] = v
 			}
 		}
-		
+
 		// For row chunks, ensure parsed_spec_ids array exists
 		if chunk.ChunkType == storage.ChunkTypeSpecRow {
 			var parsedSpecIDs []string
@@ -693,7 +848,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			}
 			metadataMap["parsed_spec_ids"] = parsedSpecIDs
 		}
-		
+
 		metadataBytes, err := json.Marshal(metadataMap)
 		if err != nil {
 			p.logger.Warn().
@@ -703,7 +858,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 		} else {
 			metadataJSON = json.RawMessage(metadataBytes)
 		}
-		
+
 		// If existing chunk found, update metadata with parsed_spec_ids instead of creating new
 		if existingChunk != nil {
 			// Parse existing metadata
@@ -715,7 +870,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			} else {
 				existingMetadata = make(map[string]interface{})
 			}
-			
+
 			// Get parsed_spec_ids from existing metadata
 			var parsedSpecIDs []string
 			if ids, ok := existingMetadata["parsed_spec_ids"].([]interface{}); ok {
@@ -727,7 +882,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			} else if ids, ok := existingMetadata["parsed_spec_ids"].([]string); ok {
 				parsedSpecIDs = ids
 			}
-			
+
 			// Add current docSourceID if not already present
 			docSourceIDStr := docSourceID.String()
 			found := false
@@ -740,7 +895,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			if !found {
 				parsedSpecIDs = append(parsedSpecIDs, docSourceIDStr)
 			}
-			
+
 			// Update metadata
 			existingMetadata["parsed_spec_ids"] = parsedSpecIDs
 			updatedMetadata, err := json.Marshal(existingMetadata)
@@ -759,7 +914,7 @@ func (p *Pipeline) storeChunks(ctx context.Context, req IngestionRequest, chunks
 			}
 			continue // Skip creating new chunk
 		}
-		
+
 		// Create new chunk
 		knowledgeChunk := &storage.KnowledgeChunk{
 			ID:                uuid.New(),
@@ -908,4 +1063,20 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// toNullableString converts an empty string to nil pointer for optional columns.
+func toNullableString(s string) *string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	val := s
+	return &val
+}
+
+func toStringOrDefault(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

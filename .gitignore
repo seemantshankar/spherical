@@ -33,3 +33,17 @@ go.work.sum
 
 # Spec Kit agent folder (may contain credentials/tokens)
 .cursor/
+
+# Universal / tooling
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
+node_modules/
+dist/
+build/
+*.log
+.env.*
+!.env.example

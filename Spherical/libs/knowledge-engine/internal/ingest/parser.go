@@ -15,13 +15,13 @@ import (
 
 // ParsedBrochure represents the extracted content from a brochure Markdown file.
 type ParsedBrochure struct {
-	Metadata     BrochureMetadata
-	SpecValues   []ParsedSpec
-	Features     []ParsedFeature
-	USPs         []ParsedUSP
-	RawChunks    []ParsedChunk
-	SourcePages  map[int]string // page number -> content
-	Errors       []ParseError
+	Metadata    BrochureMetadata
+	SpecValues  []ParsedSpec
+	Features    []ParsedFeature
+	USPs        []ParsedUSP
+	RawChunks   []ParsedChunk
+	SourcePages map[int]string // page number -> content
+	Errors      []ParseError
 }
 
 // BrochureMetadata holds YAML frontmatter metadata.
@@ -39,17 +39,17 @@ type BrochureMetadata struct {
 
 // ParsedSpec represents an extracted specification.
 type ParsedSpec struct {
-	Category          string
-	Name              string
-	Value             string
-	Unit              string
-	KeyFeatures       string // 4th column: Key Features
+	Category            string
+	Name                string
+	Value               string
+	Unit                string
+	KeyFeatures         string // 4th column: Key Features
 	VariantAvailability string // 5th column: Variant Availability
-	Numeric           *float64
-	Confidence        float64
-	SourcePage        int
-	SourceLine        int
-	RawText           string
+	Numeric             *float64
+	Confidence          float64
+	SourcePage          int
+	SourceLine          int
+	RawText             string
 }
 
 // ParsedFeature represents an extracted feature bullet.
@@ -82,9 +82,9 @@ type ParsedChunk struct {
 
 // ParseError represents a parsing error or warning.
 type ParseError struct {
-	Line    int
-	Column  int
-	Message string
+	Line     int
+	Column   int
+	Message  string
 	Severity string // "error" or "warning"
 }
 
@@ -164,11 +164,11 @@ func (p *Parser) Parse(content string) (*ParsedBrochure, error) {
 		// This makes the chunks searchable without query-type-specific logic
 		featureText := fmt.Sprintf("Key Feature: %s", feature.Body)
 		featureChunk := ParsedChunk{
-			Text:      featureText,
-			ChunkType: storage.ChunkTypeGlobal, // Use global type for features
-			SourcePage: 0, // Features don't have specific page numbers
-			StartLine: 0,
-			EndLine:   0,
+			Text:       featureText,
+			ChunkType:  storage.ChunkTypeGlobal, // Use global type for features
+			SourcePage: 0,                       // Features don't have specific page numbers
+			StartLine:  0,
+			EndLine:    0,
 			Metadata: map[string]interface{}{
 				"type": "feature",
 				"tags": feature.Tags,
@@ -180,18 +180,18 @@ func (p *Parser) Parse(content string) (*ParsedBrochure, error) {
 	// Parse USPs
 	usps := p.parseUSPs(remaining)
 	result.USPs = usps
-	
+
 	// Convert USPs to chunks for querying
 	for _, usp := range usps {
 		// Add "USP" prefix to chunk text so queries for "USP" can find these chunks
 		// This makes the chunks searchable by the keyword "USP" without query-type-specific logic
 		uspText := fmt.Sprintf("USP: %s", usp.Body)
 		uspChunk := ParsedChunk{
-			Text:      uspText,
-			ChunkType: storage.ChunkTypeGlobal, // Use global type for USPs
-			SourcePage: 0, // USPs don't have specific page numbers
-			StartLine: 0,
-			EndLine:   0,
+			Text:       uspText,
+			ChunkType:  storage.ChunkTypeGlobal, // Use global type for USPs
+			SourcePage: 0,                       // USPs don't have specific page numbers
+			StartLine:  0,
+			EndLine:    0,
 			Metadata: map[string]interface{}{
 				"type":     "usp",
 				"priority": usp.Priority,
@@ -207,6 +207,32 @@ func (p *Parser) Parse(content string) (*ParsedBrochure, error) {
 	result.RawChunks = append(result.RawChunks, chunks...)
 
 	return result, nil
+}
+
+// buildSpecFactChunkText formats a spec row into the semantic spec_fact chunk text.
+func buildSpecFactChunkText(spec ParsedSpec, gloss string) string {
+	category := strings.TrimSpace(spec.Category)
+	name := strings.TrimSpace(spec.Name)
+	value := strings.TrimSpace(spec.Value)
+	if spec.Unit != "" {
+		value = fmt.Sprintf("%s %s", value, strings.TrimSpace(spec.Unit))
+	}
+
+	header := fmt.Sprintf("%s > %s: %s", category, name, value)
+	var parts []string
+	parts = append(parts, header)
+
+	if strings.TrimSpace(spec.KeyFeatures) != "" {
+		parts = append(parts, fmt.Sprintf("Key features: %s", strings.TrimSpace(spec.KeyFeatures)))
+	}
+	if strings.TrimSpace(spec.VariantAvailability) != "" {
+		parts = append(parts, fmt.Sprintf("Availability: %s", strings.TrimSpace(spec.VariantAvailability)))
+	}
+	if strings.TrimSpace(gloss) != "" {
+		parts = append(parts, fmt.Sprintf("Gloss: %s", strings.TrimSpace(gloss)))
+	}
+
+	return strings.Join(parts, "; ")
 }
 
 // parseMetadata extracts YAML frontmatter.
@@ -279,10 +305,10 @@ func (p *Parser) parseMetadata(content string) (BrochureMetadata, string, error)
 // splitByPages splits content by page markers.
 func (p *Parser) splitByPages(content string) map[int]string {
 	pages := make(map[int]string)
-	
+
 	// Look for page markers like "<!-- PAGE 1 -->" or "## Page 1"
 	pageMarkerRe := regexp.MustCompile(`(?i)(?:<!--\s*PAGE\s*(\d+)\s*-->|##\s*Page\s*(\d+))`)
-	
+
 	matches := pageMarkerRe.FindAllStringSubmatchIndex(content, -1)
 	if len(matches) == 0 {
 		pages[1] = content
@@ -345,21 +371,17 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 		// Try 5-column format first (new format: Parent Category | Sub-Category | Specification | Value | Additional metadata)
 		matches5 := tableRow5Re.FindStringSubmatch(line)
 		if len(matches5) >= 6 {
-			// For 5-column tables: Column 1 = Parent Category, Column 2 = Sub-Category
+			// For 5-column tables: | Category | Specification | Value | Key Features | Variant Availability |
 			parentCategory := strings.TrimSpace(matches5[1])
-			subCategory := strings.TrimSpace(matches5[2])
-			name = strings.TrimSpace(matches5[3])
-			value = strings.TrimSpace(matches5[4])
-			additionalMetadata := strings.TrimSpace(matches5[5])
-			
-			// Use parent category as category for ParsedSpec (backward compatibility)
+			specification := strings.TrimSpace(matches5[2])
+			value = strings.TrimSpace(matches5[3])
+			keyFeatures = strings.TrimSpace(matches5[4])
+			variantAvailability = strings.TrimSpace(matches5[5])
+
+			// Preserve parent category, set name to specification
 			category = parentCategory
-			if category == "" {
-				category = subCategory
-			}
-			keyFeatures = additionalMetadata
-			variantAvailability = ""
-			unit = "" // Unit extracted from value if numeric
+			name = specification
+			unit = ""
 		} else {
 			// Try 4-column format (legacy: Category | Specification | Value | Unit)
 			matches4 := tableRow4Re.FindStringSubmatch(line)
@@ -386,12 +408,12 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 		}
 
 		// Skip header rows (check for 5-column, 4-column, or 3-column headers)
-		if strings.EqualFold(category, "category") || 
-		   strings.EqualFold(name, "specification") ||
-		   strings.EqualFold(name, "spec") ||
-		   strings.EqualFold(value, "value") ||
-		   strings.EqualFold(keyFeatures, "key features") ||
-		   strings.EqualFold(variantAvailability, "variant availability") {
+		if strings.EqualFold(category, "category") ||
+			strings.EqualFold(name, "specification") ||
+			strings.EqualFold(name, "spec") ||
+			strings.EqualFold(value, "value") ||
+			strings.EqualFold(keyFeatures, "key features") ||
+			strings.EqualFold(variantAvailability, "variant availability") {
 			continue
 		}
 
@@ -400,25 +422,39 @@ func (p *Parser) parseSpecTables(content string) []ParsedSpec {
 			currentCategory = p.normalizeCategory(category)
 		}
 
-		if name == "" || value == "" {
+		if name == "" {
+			continue
+		}
+
+		// Allow empty Value by falling back to keyFeatures or variantAvailability
+		fallbackValue := value
+		if strings.TrimSpace(fallbackValue) == "" {
+			if strings.TrimSpace(keyFeatures) != "" {
+				fallbackValue = keyFeatures
+			} else if strings.TrimSpace(variantAvailability) != "" {
+				fallbackValue = variantAvailability
+			}
+		}
+		// If still empty after fallbacks, skip
+		if strings.TrimSpace(fallbackValue) == "" {
 			continue
 		}
 
 		// Extract unit from value if embedded (e.g., "25.49 km/l")
 		if unit == "" {
-			value, unit = p.extractUnitFromValue(value)
+			fallbackValue, unit = p.extractUnitFromValue(fallbackValue)
 		}
 
 		spec := ParsedSpec{
-			Category:           currentCategory,
-			Name:               name,
-			Value:              value,
-			Unit:               p.unitNormalizer.Normalize(unit),
-			KeyFeatures:        keyFeatures,
+			Category:            currentCategory,
+			Name:                name,
+			Value:               fallbackValue,
+			Unit:                p.unitNormalizer.Normalize(unit),
+			KeyFeatures:         keyFeatures,
 			VariantAvailability: variantAvailability,
-			Confidence:         1.0,
-			SourceLine:         lineNum,
-			RawText:            line,
+			Confidence:          1.0,
+			SourceLine:          lineNum,
+			RawText:             line,
 		}
 
 		// Try to parse numeric value
@@ -441,24 +477,24 @@ func (p *Parser) extractUnitFromValue(value string) (string, string) {
 		"mm", "cm", "kg", "cc", "rpm", "PS",
 		"stars", "count", "passengers", "inches",
 	}
-	
+
 	// Single-char units that need more careful matching (only after numbers)
 	singleCharUnits := []string{"L", "m"}
 
 	value = strings.TrimSpace(value)
-	
+
 	// Check for space-separated unit first (safer matching)
 	if idx := strings.LastIndex(value, " "); idx > 0 {
 		potentialUnit := strings.TrimSpace(value[idx+1:])
 		numPart := strings.TrimSpace(value[:idx])
-		
+
 		// Check multi-char units
 		for _, unit := range unitPatterns {
 			if strings.EqualFold(potentialUnit, unit) {
 				return numPart, potentialUnit
 			}
 		}
-		
+
 		// Check single-char units only if preceded by a number
 		if len(numPart) > 0 && isNumericString(numPart) {
 			for _, unit := range singleCharUnits {
@@ -468,7 +504,7 @@ func (p *Parser) extractUnitFromValue(value string) (string, string) {
 			}
 		}
 	}
-	
+
 	// Check for directly attached units (e.g., "25.49km/l")
 	for _, unit := range unitPatterns {
 		if strings.HasSuffix(strings.ToLower(value), strings.ToLower(unit)) {
@@ -511,7 +547,7 @@ func (p *Parser) parseFeatures(content string) []ParsedFeature {
 
 	// Look for feature sections
 	featureSectionRe := regexp.MustCompile(`(?i)##\s*(?:Features?|Key Features?|Highlights?)\s*\n((?:[-*]\s*.+\n?)+)`)
-	
+
 	matches := featureSectionRe.FindAllStringSubmatch(content, -1)
 	for _, match := range matches {
 		if len(match) < 2 {
@@ -537,7 +573,7 @@ func (p *Parser) parseUSPs(content string) []ParsedUSP {
 
 	// Look for USP sections
 	uspSectionRe := regexp.MustCompile(`(?i)##\s*(?:USPs?|Unique Selling (?:Points?|Propositions?)|Why (?:Buy|Choose))\s*\n((?:[-*]\s*.+\n?)+)`)
-	
+
 	matches := uspSectionRe.FindAllStringSubmatch(content, -1)
 	for _, match := range matches {
 		if len(match) < 2 {
@@ -563,10 +599,10 @@ func (p *Parser) generateChunks(content string) []ParsedChunk {
 
 	// Remove markdown formatting for chunking
 	cleanContent := p.cleanMarkdown(content)
-	
+
 	// Split into sentences/paragraphs
 	paragraphs := strings.Split(cleanContent, "\n\n")
-	
+
 	var currentChunk strings.Builder
 	var currentLines []int
 	startLine := 1
@@ -631,7 +667,7 @@ func (p *Parser) parseNumericValue(value string) (float64, error) {
 	// Remove common formatting
 	cleaned := strings.ReplaceAll(value, ",", "")
 	cleaned = strings.TrimSpace(cleaned)
-	
+
 	// Try to parse as float
 	return strconv.ParseFloat(cleaned, 64)
 }
@@ -639,7 +675,7 @@ func (p *Parser) parseNumericValue(value string) (float64, error) {
 func (p *Parser) parseBulletList(content string) []string {
 	var bullets []string
 	lines := strings.Split(content, "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "-") || strings.HasPrefix(line, "*") {
@@ -649,7 +685,7 @@ func (p *Parser) parseBulletList(content string) []string {
 			}
 		}
 	}
-	
+
 	return bullets
 }
 
@@ -658,12 +694,12 @@ func (p *Parser) inferTags(text string) []string {
 	text = strings.ToLower(text)
 
 	tagKeywords := map[string][]string{
-		"safety":     {"airbag", "brake", "abs", "safety", "collision", "crash"},
-		"comfort":    {"seat", "climate", "ac", "air conditioning", "leather", "comfort"},
-		"technology": {"display", "screen", "bluetooth", "usb", "navigation", "gps", "sensor"},
+		"safety":      {"airbag", "brake", "abs", "safety", "collision", "crash"},
+		"comfort":     {"seat", "climate", "ac", "air conditioning", "leather", "comfort"},
+		"technology":  {"display", "screen", "bluetooth", "usb", "navigation", "gps", "sensor"},
 		"performance": {"engine", "horsepower", "torque", "acceleration", "speed"},
-		"efficiency": {"fuel", "mileage", "hybrid", "electric", "economy"},
-		"exterior":   {"wheel", "headlight", "grille", "body", "paint"},
+		"efficiency":  {"fuel", "mileage", "hybrid", "electric", "economy"},
+		"exterior":    {"wheel", "headlight", "grille", "body", "paint"},
 	}
 
 	for tag, keywords := range tagKeywords {
@@ -689,7 +725,7 @@ func (p *Parser) cleanMarkdown(content string) string {
 	content = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`).ReplaceAllString(content, "")
 	// Remove HTML comments
 	content = regexp.MustCompile(`<!--.*?-->`).ReplaceAllString(content, "")
-	
+
 	return content
 }
 
@@ -697,157 +733,167 @@ func (p *Parser) getOverlapText(text string, maxLen int) string {
 	if len(text) <= maxLen {
 		return text
 	}
-	
+
 	// Try to break at word boundary
 	overlap := text[len(text)-maxLen:]
 	if idx := strings.Index(overlap, " "); idx > 0 {
 		overlap = overlap[idx+1:]
 	}
-	
+
 	return overlap
 }
 
 func defaultCategoryAliases() map[string]string {
 	return map[string]string{
-		"engine specs":     "Engine",
-		"engine":           "Engine",
-		"fuel economy":     "Fuel Efficiency",
-		"fuel efficiency":  "Fuel Efficiency",
-		"mileage":          "Fuel Efficiency",
-		"transmission":     "Transmission",
-		"gearbox":          "Transmission",
-		"dimensions":       "Dimensions",
-		"size":             "Dimensions",
-		"weight":           "Weight",
-		"mass":             "Weight",
-		"safety":           "Safety",
-		"security":         "Safety",
-		"comfort":          "Comfort",
-		"interior":         "Comfort",
-		"technology":       "Technology",
-		"tech":             "Technology",
-		"infotainment":     "Technology",
-		"exterior":         "Exterior",
-		"design":           "Exterior",
-		"warranty":         "Warranty",
+		"engine specs":                  "Engine",
+		"engine":                        "Engine",
+		"fuel economy":                  "Fuel Efficiency",
+		"fuel efficiency":               "Fuel Efficiency",
+		"mileage":                       "Fuel Efficiency",
+		"transmission":                  "Transmission",
+		"gearbox":                       "Transmission",
+		"dimensions":                    "Dimensions",
+		"size":                          "Dimensions",
+		"weight":                        "Weight",
+		"mass":                          "Weight",
+		"safety":                        "Safety",
+		"security":                      "Safety",
+		"instrument cluster":            "Interior > Instrument Cluster",
+		"interior > instrument cluster": "Interior > Instrument Cluster",
+		// Colors (US/UK spellings and nested forms)
+		"color":              "Colors",
+		"colors":             "Colors",
+		"colour":             "Colors",
+		"colours":            "Colors",
+		"exterior colors":    "Colors",
+		"exterior colour":    "Colors",
+		"exterior colours":   "Colors",
+		"exterior color":     "Colors",
+		"exterior > colors":  "Colors",
+		"exterior > colour":  "Colors",
+		"exterior > colours": "Colors",
+		"body color":         "Colors",
+		"body colors":        "Colors",
+		"body colour":        "Colors",
+		"body colours":       "Colors",
+		"comfort":            "Comfort",
+		"interior":           "Comfort",
+		"technology":         "Technology",
+		"tech":               "Technology",
+		"infotainment":       "Technology",
+		"exterior":           "Exterior",
+		"design":             "Exterior",
+		"warranty":           "Warranty",
 		// Extended mappings for LLM query terms
-		"ground clearance":        "Dimensions",
-		"fuel consumption":        "Fuel Efficiency",
-		"interior comfort":         "Comfort",
-		"engine specifications":    "Engine",
-		"engine torque":           "Engine",
-		"suspension":              "Suspension",
-		"brakes":                  "Brakes",
-		"brake system":            "Brakes",
-		"wheels":                  "Wheels",
-		"tires":                   "Wheels",
-		"tyres":                   "Wheels",
-		"seating":                 "Comfort",
-		"seats":                   "Comfort",
-		"upholstery":              "Comfort",
-		"climate control":         "Comfort",
-		"air conditioning":        "Comfort",
-		"ac":                      "Comfort",
-		"heating":                 "Comfort",
-		"ventilation":             "Comfort",
-		"audio":                   "Technology",
-		"sound system":            "Technology",
-		"speaker":                 "Technology",
-		"speakers":                "Technology",
-		"navigation":              "Technology",
-		"gps":                     "Technology",
-		"connectivity":            "Technology",
-		"bluetooth":               "Technology",
-		"usb":                     "Technology",
-		"wireless":                "Technology",
-		"wireless charging":       "Technology",
-		"power":                   "Engine",
-		"horsepower":              "Engine",
-		"hp":                      "Engine",
-		"bhp":                     "Engine",
-		"displacement":            "Engine",
-		"engine capacity":         "Engine",
-		"cc":                      "Engine",
-		"cylinders":               "Engine",
-		"compression ratio":       "Engine",
-		"acceleration":            "Performance",
-		"top speed":               "Performance",
-		"max speed":               "Performance",
-		"driving range":           "Fuel Efficiency",
-		"battery capacity":        "Fuel Efficiency",
-		"charging":                "Fuel Efficiency",
-		"electric range":          "Fuel Efficiency",
-		"hybrid":                  "Fuel Efficiency",
-		"electric":                "Fuel Efficiency",
-		"ev":                      "Fuel Efficiency",
-		"phev":                    "Fuel Efficiency",
-		"length":                  "Dimensions",
-		"width":                   "Dimensions",
-		"height":                  "Dimensions",
-		"wheelbase":               "Dimensions",
-		"turning radius":          "Dimensions",
-		"boot space":              "Dimensions",
-		"trunk space":             "Dimensions",
-		"luggage capacity":        "Dimensions",
-		"cargo space":             "Dimensions",
-		"seating capacity":        "Comfort",
-		"passenger capacity":      "Comfort",
-		"airbags":                 "Safety",
-		"airbag":                  "Safety",
-		"abs":                     "Safety",
-		"anti-lock braking":       "Safety",
-		"esc":                     "Safety",
-		"electronic stability":     "Safety",
-		"traction control":         "Safety",
-		"parking sensors":          "Safety",
-		"rear camera":              "Safety",
-		"backup camera":            "Safety",
-		"blind spot":               "Safety",
-		"lane assist":              "Safety",
-		"lane keeping":             "Safety",
-		"adaptive cruise":          "Safety",
-		"cruise control":           "Safety",
-		"collision warning":        "Safety",
+		"ground clearance":            "Dimensions",
+		"fuel consumption":            "Fuel Efficiency",
+		"interior comfort":            "Comfort",
+		"engine specifications":       "Engine",
+		"engine torque":               "Engine",
+		"suspension":                  "Suspension",
+		"brakes":                      "Brakes",
+		"brake system":                "Brakes",
+		"wheels":                      "Wheels",
+		"tires":                       "Wheels",
+		"tyres":                       "Wheels",
+		"seating":                     "Comfort",
+		"seats":                       "Comfort",
+		"upholstery":                  "Comfort",
+		"climate control":             "Comfort",
+		"air conditioning":            "Comfort",
+		"ac":                          "Comfort",
+		"heating":                     "Comfort",
+		"ventilation":                 "Comfort",
+		"audio":                       "Technology",
+		"sound system":                "Technology",
+		"speaker":                     "Technology",
+		"speakers":                    "Technology",
+		"navigation":                  "Technology",
+		"gps":                         "Technology",
+		"connectivity":                "Technology",
+		"bluetooth":                   "Technology",
+		"usb":                         "Technology",
+		"wireless":                    "Technology",
+		"wireless charging":           "Technology",
+		"power":                       "Engine",
+		"horsepower":                  "Engine",
+		"hp":                          "Engine",
+		"bhp":                         "Engine",
+		"displacement":                "Engine",
+		"engine capacity":             "Engine",
+		"cc":                          "Engine",
+		"cylinders":                   "Engine",
+		"compression ratio":           "Engine",
+		"acceleration":                "Performance",
+		"top speed":                   "Performance",
+		"max speed":                   "Performance",
+		"driving range":               "Fuel Efficiency",
+		"battery capacity":            "Fuel Efficiency",
+		"charging":                    "Fuel Efficiency",
+		"electric range":              "Fuel Efficiency",
+		"hybrid":                      "Fuel Efficiency",
+		"electric":                    "Fuel Efficiency",
+		"ev":                          "Fuel Efficiency",
+		"phev":                        "Fuel Efficiency",
+		"length":                      "Dimensions",
+		"width":                       "Dimensions",
+		"height":                      "Dimensions",
+		"wheelbase":                   "Dimensions",
+		"turning radius":              "Dimensions",
+		"boot space":                  "Dimensions",
+		"trunk space":                 "Dimensions",
+		"luggage capacity":            "Dimensions",
+		"cargo space":                 "Dimensions",
+		"seating capacity":            "Comfort",
+		"passenger capacity":          "Comfort",
+		"airbags":                     "Safety",
+		"airbag":                      "Safety",
+		"abs":                         "Safety",
+		"anti-lock braking":           "Safety",
+		"esc":                         "Safety",
+		"electronic stability":        "Safety",
+		"traction control":            "Safety",
+		"parking sensors":             "Safety",
+		"rear camera":                 "Safety",
+		"backup camera":               "Safety",
+		"blind spot":                  "Safety",
+		"lane assist":                 "Safety",
+		"lane keeping":                "Safety",
+		"adaptive cruise":             "Safety",
+		"cruise control":              "Safety",
+		"collision warning":           "Safety",
 		"automatic emergency braking": "Safety",
-		"aeb":                     "Safety",
-		"child safety":            "Safety",
-		"isofix":                  "Safety",
-		"isofix seats":            "Safety",
-		"child seat":              "Safety",
-		"headlights":              "Exterior",
-		"headlamps":               "Exterior",
-		"taillights":              "Exterior",
-		"fog lights":              "Exterior",
-		"led":                     "Exterior",
-		"sunroof":                 "Exterior",
-		"moonroof":                "Exterior",
-		"panoramic roof":          "Exterior",
-		"alloy wheels":            "Wheels",
-		"steel wheels":            "Wheels",
-		"wheel size":              "Wheels",
-		"rim size":                "Wheels",
-		"tire size":               "Wheels",
-		"tyre size":               "Wheels",
-		"colors":                  "Exterior",
-		"colours":                 "Exterior",
-		"color options":           "Exterior",
-		"colour options":          "Exterior",
-		"paint":                   "Exterior",
-		"body color":              "Exterior",
-		"body colour":             "Exterior",
-		"exterior color":          "Exterior",
-		"exterior colour":         "Exterior",
-		"interior color":          "Comfort",
-		"interior colour":         "Comfort",
-		"material":                "Comfort",
-		"materials":               "Comfort",
-		"leather":                 "Comfort",
-		"fabric":                  "Comfort",
-		"upholstery material":     "Comfort",
-		"fuel tank capacity":      "Fuel Efficiency",
-		"fuel tank":               "Fuel Efficiency",
-		"tank capacity":           "Fuel Efficiency",
-		"fuel capacity":           "Fuel Efficiency",
+		"aeb":                         "Safety",
+		"child safety":                "Safety",
+		"isofix":                      "Safety",
+		"isofix seats":                "Safety",
+		"child seat":                  "Safety",
+		"headlights":                  "Exterior",
+		"headlamps":                   "Exterior",
+		"taillights":                  "Exterior",
+		"fog lights":                  "Exterior",
+		"led":                         "Exterior",
+		"sunroof":                     "Exterior",
+		"moonroof":                    "Exterior",
+		"panoramic roof":              "Exterior",
+		"alloy wheels":                "Wheels",
+		"steel wheels":                "Wheels",
+		"wheel size":                  "Wheels",
+		"rim size":                    "Wheels",
+		"tire size":                   "Wheels",
+		"tyre size":                   "Wheels",
+		// Colors (US/UK) handled earlier; keep interior mapping only
+		"interior color":      "Comfort",
+		"interior colour":     "Comfort",
+		"material":            "Comfort",
+		"materials":           "Comfort",
+		"leather":             "Comfort",
+		"fabric":              "Comfort",
+		"upholstery material": "Comfort",
+		"fuel tank capacity":  "Fuel Efficiency",
+		"fuel tank":           "Fuel Efficiency",
+		"tank capacity":       "Fuel Efficiency",
+		"fuel capacity":       "Fuel Efficiency",
 	}
 }
 
@@ -942,11 +988,11 @@ func ValidateParsedBrochure(parsed *ParsedBrochure) []ParseError {
 	return errors
 }
 
-// GenerateSpecID creates a deterministic ID for a spec value.
-func GenerateSpecID(tenantID, productID uuid.UUID, category, name string) uuid.UUID {
+// GenerateSpecID creates a deterministic ID for a spec value (include value and campaign to avoid cross-campaign collisions).
+func GenerateSpecID(tenantID, productID, campaignVariantID uuid.UUID, category, name, value string) uuid.UUID {
 	// Use UUID v5 for deterministic generation
 	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // DNS namespace
-	data := fmt.Sprintf("%s:%s:%s:%s", tenantID, productID, category, name)
+	data := fmt.Sprintf("%s:%s:%s:%s:%s:%s", tenantID, productID, campaignVariantID, category, name, value)
 	return uuid.NewSHA1(namespace, []byte(data))
 }
 
@@ -959,7 +1005,7 @@ func computeContentHash(text string) string {
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 	// Normalize multiple spaces to single space
 	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
-	
+
 	// Compute SHA-256 hash
 	hash := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(hash[:])
@@ -969,7 +1015,7 @@ func computeContentHash(text string) string {
 // Format: "Category: {parent}\nSub-Category: {sub}\nSpecification: {spec}\nValue: {value}\nAdditional Metadata: {meta}"
 func formatRowChunkText(parentCategory, subCategory, specificationType, value, additionalMetadata string) string {
 	var parts []string
-	
+
 	if parentCategory != "" {
 		parts = append(parts, fmt.Sprintf("Category: %s", strings.TrimSpace(parentCategory)))
 	}
@@ -985,7 +1031,7 @@ func formatRowChunkText(parentCategory, subCategory, specificationType, value, a
 	if additionalMetadata != "" {
 		parts = append(parts, fmt.Sprintf("Additional Metadata: %s", strings.TrimSpace(additionalMetadata)))
 	}
-	
+
 	return strings.Join(parts, "\n")
 }
 
@@ -993,7 +1039,7 @@ func formatRowChunkText(parentCategory, subCategory, specificationType, value, a
 // Returns a map with parent_category, sub_category, specification_type, value, additional_metadata, and table_column_N fields.
 func extractTableRowMetadata(parentCategory, subCategory, specificationType, value, additionalMetadata string) map[string]interface{} {
 	metadata := make(map[string]interface{})
-	
+
 	// Use default values for empty fields
 	if parentCategory == "" {
 		parentCategory = "Uncategorized"
@@ -1004,7 +1050,7 @@ func extractTableRowMetadata(parentCategory, subCategory, specificationType, val
 	if specificationType == "" {
 		specificationType = "Unknown"
 	}
-	
+
 	metadata["parent_category"] = strings.TrimSpace(parentCategory)
 	metadata["sub_category"] = strings.TrimSpace(subCategory)
 	metadata["specification_type"] = strings.TrimSpace(specificationType)
@@ -1012,14 +1058,14 @@ func extractTableRowMetadata(parentCategory, subCategory, specificationType, val
 	if additionalMetadata != "" {
 		metadata["additional_metadata"] = strings.TrimSpace(additionalMetadata)
 	}
-	
+
 	// Store raw column values for reference
 	metadata["table_column_1"] = strings.TrimSpace(parentCategory)
 	metadata["table_column_2"] = strings.TrimSpace(subCategory)
 	metadata["table_column_3"] = strings.TrimSpace(specificationType)
 	metadata["table_column_4"] = strings.TrimSpace(value)
 	metadata["table_column_5"] = strings.TrimSpace(additionalMetadata)
-	
+
 	return metadata
 }
 
@@ -1027,29 +1073,29 @@ func extractTableRowMetadata(parentCategory, subCategory, specificationType, val
 // This function processes tables and generates one chunk per row.
 func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk {
 	var chunks []ParsedChunk
-	
+
 	// Match 5-column tables: | Parent Category | Sub-Category | Specification | Value | Additional metadata |
 	tableRow5Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
 	// Match 4-column tables: | Category | Specification | Value | Unit |
 	tableRow4Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
 	// Match 3-column tables: | Category | Specification | Value |
 	tableRow3Re := regexp.MustCompile(`\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|`)
-	
+
 	lines := strings.Split(content, "\n")
 	lineNum := 0
-	
+
 	for _, line := range lines {
 		lineNum++
 		line = strings.TrimSpace(line)
-		
+
 		// Skip header/separator rows
 		if strings.Contains(line, "---") || strings.Contains(line, "===") {
 			continue
 		}
-		
+
 		var parentCategory, subCategory, specificationType, value, additionalMetadata string
 		var isTableRow bool
-		
+
 		// Try 5-column format first
 		matches5 := tableRow5Re.FindStringSubmatch(line)
 		if len(matches5) >= 6 {
@@ -1058,24 +1104,31 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 			col3 := strings.TrimSpace(matches5[3])
 			col4 := strings.TrimSpace(matches5[4])
 			col5 := strings.TrimSpace(matches5[5])
-			
+
 			// Detect table format by checking if col2 looks like a specification name or a value
 			// Format 1: | Parent Category | Sub-Category | Specification | Value | Additional |
 			// Format 2: | Category | Specification | Value | Key Features | Variant Availability |
 			// Format 3: | Category | Specification | Value | | Additional |
-			
+
 			// Check if this is Format 2 or 3 (Category | Specification | Value | ...)
 			// In these formats, col2 is the specification name, col3 is the value
 			// Format 2: | Category | Specification | Value | Key Features | Variant Availability |
 			// Format 3: | Category | Specification | Value | | Additional |
 			// Format 4: | Category | Specification | | | Variant Availability | (value empty, use specification as value)
-			
-			// Detect Format 2/3/4: If col3 looks like a value (not empty and not a header), or if col3 is empty but col2 is a specification
-			// Key indicator: col2 is the specification name, not a sub-category
-			if col2 != "" && (col3 != "" || (col3 == "" && col4 == "" && col5 != "")) {
+
+			// Prefer standard 5-column interpretation when we clearly have a value in col4 (Format 1).
+			// Only consider the "Category | Specification | Value | Key Features | Variant Availability" path
+			// when col4 is empty (no clear value) or when col2 strongly looks like a specification name.
+			if col4 != "" {
+				parentCategory = col1
+				subCategory = col2
+				specificationType = col3
+				value = col4
+				additionalMetadata = col5
+			} else if col2 != "" && (col3 != "" || (col3 == "" && col4 == "" && col5 != "")) {
 				// Check if col2 looks like a specification name (not a sub-category)
 				// Specifications are usually longer, more descriptive, or contain specific keywords
-				isSpecificationName := len(col2) > 5 || 
+				isSpecificationName := len(col2) > 5 ||
 					strings.Contains(strings.ToLower(col2), "color") ||
 					strings.Contains(strings.ToLower(col2), "carplay") ||
 					strings.Contains(strings.ToLower(col2), "android") ||
@@ -1084,7 +1137,7 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 					strings.Contains(strings.ToLower(col2), "system") ||
 					strings.Contains(strings.ToLower(col2), "feature") ||
 					!strings.Contains(col2, ">") // Sub-categories often have ">" separator
-				
+
 				if isSpecificationName {
 					// Format 2/3/4: Category | Specification | Value | ... |
 					parentCategory = col1
@@ -1115,22 +1168,22 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 				value = col4
 				additionalMetadata = col5
 			}
-			
+
 			isTableRow = true
 		} else {
 			// Try 4-column format (only if 5-column didn't match)
 			// Count the number of pipe-separated columns to avoid matching 5-column rows as 4-column
 			pipeCount := strings.Count(line, "|")
 			if pipeCount == 5 { // 4-column table has 5 pipes (including leading and trailing)
-			matches4 := tableRow4Re.FindStringSubmatch(line)
-			if len(matches4) >= 5 {
-				// For 4-column: Column 1 = Category, Column 2 = Specification, Column 3 = Value, Column 4 = Unit
-				parentCategory = strings.TrimSpace(matches4[1])
-				subCategory = "General" // Default for 4-column tables
-				specificationType = strings.TrimSpace(matches4[2])
-				value = strings.TrimSpace(matches4[3])
-				additionalMetadata = strings.TrimSpace(matches4[4]) // Unit goes here
-				isTableRow = true
+				matches4 := tableRow4Re.FindStringSubmatch(line)
+				if len(matches4) >= 5 {
+					// For 4-column: Column 1 = Category, Column 2 = Specification, Column 3 = Value, Column 4 = Unit
+					parentCategory = strings.TrimSpace(matches4[1])
+					subCategory = "General" // Default for 4-column tables
+					specificationType = strings.TrimSpace(matches4[2])
+					value = strings.TrimSpace(matches4[3])
+					additionalMetadata = strings.TrimSpace(matches4[4]) // Unit goes here
+					isTableRow = true
 				}
 			} else if pipeCount == 4 { // 3-column table has 4 pipes
 				// Try 3-column format
@@ -1146,22 +1199,22 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 				}
 			}
 		}
-		
+
 		// Skip if not a table row or if it's a header row
 		if !isTableRow {
 			continue
 		}
-		
+
 		// Skip header rows
-		if strings.EqualFold(parentCategory, "category") || 
-		   strings.EqualFold(parentCategory, "parent category") ||
-		   strings.EqualFold(subCategory, "sub-category") ||
-		   strings.EqualFold(specificationType, "specification") ||
-		   strings.EqualFold(specificationType, "spec") ||
-		   strings.EqualFold(value, "value") {
+		if strings.EqualFold(parentCategory, "category") ||
+			strings.EqualFold(parentCategory, "parent category") ||
+			strings.EqualFold(subCategory, "sub-category") ||
+			strings.EqualFold(specificationType, "specification") ||
+			strings.EqualFold(specificationType, "spec") ||
+			strings.EqualFold(value, "value") {
 			continue
 		}
-		
+
 		// Skip empty rows
 		// Allow rows where value is empty if specificationType exists
 		// Some specifications (like "Apple CarPlay and Android Auto") don't have a value column,
@@ -1171,17 +1224,17 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 		}
 		// Keep value empty if it's empty - don't replace it with additionalMetadata
 		// The variant availability in additionalMetadata is separate information
-		
+
 		// Format structured text
 		structuredText := formatRowChunkText(parentCategory, subCategory, specificationType, value, additionalMetadata)
-		
+
 		// Generate content hash
 		contentHash := computeContentHash(structuredText)
-		
+
 		// Extract metadata
 		metadata := extractTableRowMetadata(parentCategory, subCategory, specificationType, value, additionalMetadata)
 		metadata["content_hash"] = contentHash
-		
+
 		// Create ParsedChunk
 		chunk := ParsedChunk{
 			Text:       structuredText,
@@ -1191,10 +1244,9 @@ func (p *Parser) generateRowChunks(content string, sourcePage int) []ParsedChunk
 			EndLine:    lineNum,
 			Metadata:   metadata,
 		}
-		
+
 		chunks = append(chunks, chunk)
 	}
-	
+
 	return chunks
 }
-

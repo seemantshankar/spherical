@@ -381,3 +381,62 @@ func TestAvailabilityDetector_MultipleChunks(t *testing.T) {
 	assert.Equal(t, 2, len(status.MatchedChunks), "Should include all chunks")
 }
 
+func TestAvailabilityDetector_DetermineAvailabilityWithThresholds_AllPaths(t *testing.T) {
+	detector := NewAvailabilityDetector(0.6, 0.5)
+
+	// Test with zero custom thresholds (should use defaults)
+	status := detector.DetermineAvailabilityWithThresholds(
+		"Fuel Economy",
+		[]SpecFact{
+			{
+				Category:   "Fuel Efficiency",
+				Name:       "Fuel Economy",
+				Value:      "25.49",
+				Confidence: 0.7,
+			},
+		},
+		[]SemanticChunk{},
+		0.0, // Zero threshold - should use default
+		0.0, // Zero threshold - should use default
+	)
+	assert.Equal(t, AvailabilityStatusFound, status.Status)
+
+	// Test with negative thresholds (should use defaults)
+	status = detector.DetermineAvailabilityWithThresholds(
+		"Fuel Economy",
+		[]SpecFact{
+			{
+				Category:   "Fuel Efficiency",
+				Name:       "Fuel Economy",
+				Value:      "25.49",
+				Confidence: 0.7,
+			},
+		},
+		[]SemanticChunk{},
+		-0.1, // Negative threshold - should use default
+		-0.1, // Negative threshold - should use default
+	)
+	assert.Equal(t, AvailabilityStatusFound, status.Status)
+
+	// Test with very low confidence and high threshold
+	status = detector.DetermineAvailabilityWithThresholds(
+		"Fuel Economy",
+		[]SpecFact{
+			{
+				Category:   "Fuel Efficiency",
+				Name:       "Fuel Economy",
+				Value:      "25.49",
+				Confidence: 0.3, // Low confidence
+			},
+		},
+		[]SemanticChunk{},
+		0.8, // High threshold
+		0.8, // High threshold
+	)
+	// Should be unavailable or partial
+	assert.Contains(t, []AvailabilityStatus{
+		AvailabilityStatusUnavailable,
+		AvailabilityStatusPartial,
+	}, status.Status)
+}
+
